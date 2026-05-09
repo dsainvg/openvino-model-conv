@@ -17,9 +17,10 @@ modules accept the real V4-Flash weights wherever there is enough RAM/VRAM to ho
 | PyTorch ↔ OpenVINO greedy match (B=1) | matches |
 | Dynamic shapes (`(1,64) (1,128) (1,256) (2,128)`) | all run |
 | B=2 numerical match | one element drifts (FP rounding, not a topology bug) |
-| Real V4-Flash weights (284B / FP4 experts) | not loaded — out of scope for the local PoC |
-| `optimum-intel` `from_pretrained` integration | not done |
-| INT8 / INT4 quantization via NNCF | not done |
+| INT8 / INT4 weight compression via NNCF | works on toy IR, greedy match to FP32 |
+| `optimum-intel` `OVModelForCausalLM.from_pretrained` | works (toy, `use_cache=False`) |
+| Real V4-Flash weight loader (FP4 + FP8 dequant) | code written, dequant verified on synthetic tensors, name-mapping covers 100% of real-V4 keys |
+| Real V4-Flash full load | not run — needs ~500 GB peak RAM (this host has 64 GB) |
 
 The agreed done bar for the PoC was **"OpenVINO IR loads + runs without crashing"** — that
 bar is met, plus a numerical sanity check vs. PyTorch.
@@ -63,8 +64,12 @@ src/deepseek_v4/
 tests/
   test_modeling_smoke.py         # toy config + PyTorch forward smoke test
   test_ov_dynamic_shapes.py      # IR runs on shapes other than the trace shape
+  test_dequant.py                # FP4/FP8 dequant + name-mapping unit tests
 scripts/
   convert_to_openvino.py         # PyTorch -> ov.convert_model -> save IR -> CPU run + compare
+  quantize_with_nncf.py          # FP32 IR -> INT8 / INT4 via nncf.compress_weights
+  export_to_optimum_intel.py     # save HF dir + bundle IR -> OVModelForCausalLM.from_pretrained
+  load_real_v4_weights.py        # real-V4 -> ours: FP4/FP8 dequant + name mapping (--dry-run)
   fetch_v4_meta.py               # downloads the HF V4-Flash repo metadata
   probe_v4_repos.py              # quick HF probe utility
 v4_flash_meta/                   # mirrored HF metadata + reference impl (deepseek MIT)
@@ -94,6 +99,16 @@ python scripts\convert_to_openvino.py
 
 # 3. Verify the saved IR runs at shapes other than the trace shape
 python tests\test_ov_dynamic_shapes.py
+
+# 4. Compress the IR to INT8 and INT4 with NNCF; compare numerics + size vs FP32
+python scripts\quantize_with_nncf.py
+
+# 5. Save model in HF format + bundled IR; load through optimum-intel
+python scripts\export_to_optimum_intel.py
+
+# 6. (real V4 only) Verify the FP4/FP8 dequant + name mapping
+python tests\test_dequant.py
+python scripts\load_real_v4_weights.py --dry-run
 ```
 
 Step 2 prints both PyTorch and OpenVINO logits and the greedy next-token comparison.
@@ -120,18 +135,35 @@ The toy model is intentionally tiny so the PoC runs in seconds on CPU:
 The 4-layer mix `[0, 0, 4, 128]` exercises every attention path: pure sliding window, then
 window + indexer-driven sparse compression, then window + dense compression.
 
+## Real-V4 weight loader
+
+`scripts/load_real_v4_weights.py` reads `model.safetensors.index.json` from a
+real V4-Flash checkpoint, maps every key to our parameter names, and dequantizes
+FP4 expert weights and FP8 main weights to BF16 shard-by-shard.
+
+- Dequant logic (FP4 e2m1fn with 32-col E8M0 microscale, FP8 e4m3fn with
+  128×128 block scale) is unit-tested with synthetic tensors in
+  `tests/test_dequant.py`.
+- `--dry-run` reads only the index and verifies coverage. On the real
+  V4-Flash index this currently reports: 67,569 keys mapped to our params,
+  1,618 on the explicit skip list (MTP blocks + hash-routing tables + routed-gate
+  bias), 0 unmapped.
+- The full load is not exercised on this host: real V4-Flash needs roughly
+  500 GB peak RAM after BF16 dequant, vs. our 64 GB.
+
 ## Known limitations
 
-- **Toy weights only.** Real V4-Flash weights (~140 GB at INT4) cannot fit on a 64 GB host.
-  The same code path will accept real weights once mapped onto the parameter names in
-  `modeling_deepseek_v4.py`.
+- **Toy weights only on this host.** The loader is written but the full real-V4
+  load needs ~500 GB peak RAM. On a sufficiently large host the entry point is
+  `python scripts/load_real_v4_weights.py --weights-dir <V4-Flash dir>`.
 - **B=2 numerical drift.** Trace was at B=1; running the IR at B=2 produces a single
   divergent greedy token from FP rounding-order differences, not a topology bug.
-- **Prefill-only.** The Compressor and KV cache do not carry across calls; no `past_key_values`
-  plumbing for autoregressive decode yet.
-- **No `optimum-intel` registration.** `from_pretrained` + `OVModelForCausalLM` does not
-  yet recognize `model_type=deepseek_v4`.
-- **No quantization.** Everything runs in BF16/FP32; INT8 / INT4 via NNCF is a follow-up.
+- **Prefill-only.** The Compressor and KV cache do not carry across calls; no
+  `past_key_values` plumbing for autoregressive decode yet, so
+  `OVModelForCausalLM` is loaded with `use_cache=False`.
+- **MTP and hash routing not implemented.** Multi-Token Prediction blocks and the
+  hash-routing tables of the first 3 layers are skipped on real-V4 load
+  (`num_nextn_predict_layers=0`, `num_hash_layers=0` in our config).
 
 ## Attribution
 

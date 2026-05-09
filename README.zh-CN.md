@@ -17,9 +17,10 @@
 | PyTorch 与 OpenVINO 的贪心采样一致性 (B=1) | 一致 |
 | 动态 shape (`(1,64) (1,128) (1,256) (2,128)`) | 全部可运行 |
 | B=2 数值一致性 | 有 1 个 token 漂移(FP 舍入顺序差异,非拓扑问题) |
-| 真实 V4-Flash 权重 (284B / FP4 专家) | 未加载 — 不在本地 PoC 范围内 |
-| `optimum-intel` 的 `from_pretrained` 接入 | 未完成 |
-| 通过 NNCF 做 INT8 / INT4 量化 | 未完成 |
+| 通过 NNCF 做 INT8 / INT4 权重压缩 | 在 toy IR 上通过,贪心 token 与 FP32 一致 |
+| `optimum-intel` 的 `OVModelForCausalLM.from_pretrained` | 通过(toy,`use_cache=False`) |
+| 真实 V4-Flash 权重加载器 (FP4 + FP8 反量化) | 代码已写;反量化逻辑用合成张量验证;名字映射 100% 覆盖真实 V4 的 key |
+| 真实 V4-Flash 完整加载 | 未运行 — 需要约 500 GB 内存(本机 64 GB) |
 
 约定的 PoC 完成标准是 **"OpenVINO IR 能够加载并运行而不崩溃"** —— 该标准已达成,
 另外还做了与 PyTorch 的数值一致性自检。
@@ -60,8 +61,12 @@ src/deepseek_v4/
 tests/
   test_modeling_smoke.py         # toy 配置 + PyTorch 前向冒烟测试
   test_ov_dynamic_shapes.py      # 在与追踪 shape 不同的输入上运行 IR
+  test_dequant.py                # FP4/FP8 反量化与名字映射的单元测试
 scripts/
   convert_to_openvino.py         # PyTorch -> ov.convert_model -> 保存 IR -> CPU 运行 + 对比
+  quantize_with_nncf.py          # 用 nncf.compress_weights 把 FP32 IR 压到 INT8 / INT4
+  export_to_optimum_intel.py     # 保存 HF 目录并打包 IR -> OVModelForCausalLM.from_pretrained
+  load_real_v4_weights.py        # 真实 V4 -> 我们的命名:FP4/FP8 反量化 + 名字映射 (--dry-run)
   fetch_v4_meta.py               # 下载 HF V4-Flash 仓库的元数据
   probe_v4_repos.py              # 快速探测 HF 仓库的小工具
 v4_flash_meta/                   # 镜像的 HF 元数据 + 参考实现 (deepseek MIT 许可)
@@ -91,6 +96,16 @@ python scripts\convert_to_openvino.py
 
 # 3. 验证保存的 IR 可以在与追踪时不同的 shape 上运行
 python tests\test_ov_dynamic_shapes.py
+
+# 4. 用 NNCF 把 IR 压到 INT8 / INT4,并对比与 FP32 的数值与体积
+python scripts\quantize_with_nncf.py
+
+# 5. 以 HF 格式保存模型并打包 IR,通过 optimum-intel 加载
+python scripts\export_to_optimum_intel.py
+
+# 6. (面向真实 V4) 验证 FP4/FP8 反量化与名字映射
+python tests\test_dequant.py
+python scripts\load_real_v4_weights.py --dry-run
 ```
 
 第 2 步会同时打印 PyTorch 和 OpenVINO 的 logits,以及贪心采样的下一个 token 是否一致。
@@ -117,18 +132,30 @@ IR 会被写到 `ov_ir_toy/deepseek_v4_toy.xml`(以及对应的 `.bin`)。
 4 层组合 `[0, 0, 4, 128]` 可以覆盖到所有的注意力路径: 纯滑动窗口、窗口 + 索引器驱动的稀疏
 压缩、以及窗口 + 稠密压缩。
 
+## 真实 V4 权重加载器
+
+`scripts/load_real_v4_weights.py` 读取真实 V4-Flash 检查点中的
+`model.safetensors.index.json`,把每个 key 映射到我们的参数名,并按 shard 把
+FP4 专家权重(e2m1fn,32 列一份的 E8M0 微缩放)与 FP8 主干权重(e4m3fn,
+128×128 块缩放)反量化为 BF16。
+
+- 反量化逻辑由 `tests/test_dequant.py` 用合成张量做单元测试覆盖。
+- `--dry-run` 仅读取 index 文件、检查命名覆盖。在真实 V4-Flash 的 index 上当前给出:
+  67,569 个 key 映射到我们的参数,1,618 个落在显式跳过名单(MTP 块、hash routing
+  表、路由门偏置),0 个未映射。
+- **完整加载在本机不会跑**: BF16 反量化后大约需要 500 GB 内存峰值,而本机 64 GB。
+
 ## 已知限制
 
-- **仅 toy 权重**。真实 V4-Flash 权重(INT4 下约 140 GB)无法装入 64 GB 主机。
-  当外部环境把真实权重映射到 `modeling_deepseek_v4.py` 中的参数名后,同一条转换路径
-  即可适用。
+- **本机只能用 toy 权重**。加载器代码已写好,但完整加载真实 V4 大约需要 500 GB 内存峰值。
+  在足够大的机器上的入口是
+  `python scripts/load_real_v4_weights.py --weights-dir <V4-Flash 目录>`。
 - **B=2 数值漂移**。追踪时使用的是 B=1,以 B=2 运行 IR 时会出现 1 个贪心 token 漂移,
   原因是浮点累加顺序差异,不是拓扑问题。
 - **仅支持 prefill**。Compressor 与 KV cache 不会跨调用保留;尚未为自回归解码接入
-  `past_key_values`。
-- **未注册到 `optimum-intel`**。`from_pretrained` + `OVModelForCausalLM` 还不能识别
-  `model_type=deepseek_v4`。
-- **无量化**。当前全部以 BF16/FP32 运行;通过 NNCF 做 INT8 / INT4 是后续工作。
+  `past_key_values`,因此 `OVModelForCausalLM` 需要以 `use_cache=False` 加载。
+- **未实现 MTP 与 hash routing**。Multi-Token Prediction 块以及前 3 层的 hash-routing
+  表在加载真实 V4 时被跳过(配置中 `num_nextn_predict_layers=0`、`num_hash_layers=0`)。
 
 ## 致谢
 
