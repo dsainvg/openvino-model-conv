@@ -86,7 +86,7 @@ from transformers import AutoTokenizer
 # trust_remote_code=True pulls the bundled configuration_/modeling_ source files.
 # use_cache=False because the IR is prefill-only — no past_key_values input.
 model = OVModelForCausalLM.from_pretrained(
-    "bob798/deepseek-v4-toy-int4-ov",
+    "imbob798/deepseek-v4-toy-int4-ov",
     trust_remote_code=True,
     use_cache=False,
 )

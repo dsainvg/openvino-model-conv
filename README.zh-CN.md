@@ -5,7 +5,7 @@
 `openvino.convert_model` 完成图追踪,导出为 IR,然后重新加载并在 CPU 上推理。
 同一套 Python 模块在显存/内存足够的环境下可以直接加载真正的 V4-Flash 权重。
 
-[English README](README.md)
+[English README](README.md) — [Hugging Face: `imbob798/deepseek-v4-toy-int4-ov`](https://huggingface.co/imbob798/deepseek-v4-toy-int4-ov)
 
 ## 当前状态
 

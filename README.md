@@ -5,7 +5,7 @@ A toy-sized model with random weights is built end-to-end in pure PyTorch, trace
 `openvino.convert_model`, saved as IR, then reloaded and run on CPU. The same Python
 modules accept the real V4-Flash weights wherever there is enough RAM/VRAM to host them.
 
-[中文 README](README.zh-CN.md)
+[中文 README](README.zh-CN.md) — [Hugging Face: `imbob798/deepseek-v4-toy-int4-ov`](https://huggingface.co/imbob798/deepseek-v4-toy-int4-ov)
 
 ## Status
 

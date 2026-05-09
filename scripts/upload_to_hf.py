@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-REPO_ID_DEFAULT = "bob798/deepseek-v4-toy-int4-ov"
+REPO_ID_DEFAULT = "imbob798/deepseek-v4-toy-int4-ov"
 LOCAL_DIR = ROOT / "hf_upload_toy_int4"
 
 
