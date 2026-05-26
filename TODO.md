@@ -2,86 +2,165 @@
 
 Updated: 2026-05-26
 
-Hardware: Intel Core Ultra 9 285H, 64GB RAM, Arc 140T iGPU
+Hardware: Intel Core Ultra 9 285H, 64GB RAM (shared with iGPU), Arc 140T iGPU, NPU
 
 Upstream issues filed:
 - huggingface/optimum-intel#1748
 - openvinotoolkit/openvino#36071
 
+本项目分两个方向并行推进。
+
 ---
 
-## P0 — 64GB 本机可做，价值最高
+# 方向一：Toy PoC 完善（架构验证 + upstream 贡献）
 
-### 1. Autoregressive decode（KV cache）
+目标：把 toy 模型从 "能跑 prefill" 做到 "功能完整的 HF 集成"，推动 upstream 合入。
+
+## P0 — 立刻可做
+
+### 1.1 Autoregressive decode（KV cache）
 - 实现 `past_key_values` 输入/输出，支持逐 token 生成
 - 难点：V4 的 KV cache 结构**逐层不同**（sliding-window / ratio-4 compressed / ratio-128 compressed）
 - 改造 `modeling_deepseek_v4.py`：每个 attention 层返回各自形状的 KV cache
 - 改造 `convert_to_openvino.py`：追踪时带 `past_key_values` 动态输入
-- 移除 `use_cache=False` 限制，让 `OVModelForCausalLM` 支持真正的生成
+- 移除 `use_cache=False` 限制
 - toy 模型上做 + 验证，不依赖真实权重
-- **价值**：从 "能跑 prefill" 到 "能生成文本"，是项目实用性的分水岭
+- **价值**：从 "能跑 prefill" 到 "能生成文本"
 
-### 2. MXFP4 量化路径验证（toy 上）
+### 1.2 MXFP4 量化路径验证（toy 上）
 - OpenVINO 2026.0 已支持 `CompressWeightsMode.E2M1`（MXFP4 + E8M0 microscale, CPU only）
 - 改造 `scripts/quantize_with_nncf.py`：增加 MXFP4 量化路径
 - 在 toy IR 上验证 MXFP4 压缩 + 推理正确性
-- **价值**：为未来大机器上用原生 FP4（~140GB 而非 ~500GB）铺路
-
-### 3. GPU 后端验证（Intel Arc 140T iGPU）
-- 本机自带 Arc 140T，测试 `compile_model(model, "GPU")`
-- 记录 iGPU 上的兼容性和性能差异
-- **价值**：低成本验证，Intel AI PC 是 OpenVINO 的主推场景
-
----
+- **价值**：为方向二和大机器真实权重铺路
 
 ## P1 — 等外部条件
 
-### 4. optimum-intel 上游 PR
-- 等 issue #1748 维护者回复 per-layer KV cache 的方案
-- 按回复指引编写 `DeepSeekV4OnnxConfig` + `DeepSeekV4OpenVINOConfig` + patcher + cache generator
+### 1.3 optimum-intel 上游 PR
+- 等 issue #1748 维护者回复 per-layer KV cache 方案
+- 编写 `DeepSeekV4OnnxConfig` + `DeepSeekV4OpenVINOConfig` + patcher + cache generator
 - 目标：`pip install optimum-intel` 后直接 `from_pretrained("deepseek-ai/DeepSeek-V4-Flash")`
 
-### 5. 真实 V4-Flash 权重全量加载
-- **阻塞条件**：需要 >=512GB RAM 机器（BF16 dequant），或 >=256GB + MXFP4 路径
-- 方案 A：租云实例（AWS r7i.16xlarge 512GB ~$4/hr，一次转换 ~$10-20）
-- 方案 B：找 Intel DevCloud / 社区合作者提供大内存环境
-- 方案 C：实现分片逐层加载（改 `load_real_v4_weights.py`，逐层 dequant → 逐层写入 IR，峰值降到 ~60-80GB），可能在 64GB 上勉强可行但需要大量工程
-- 转换完的 INT4 IR (~70-80GB) 可下载回本机，推理时 64GB 可能勉强够
-
-### 6. 真实权重的 OpenVINO 推理验证
-- 依赖 #5 完成
-- `ov.convert_model` 追踪真实规模模型（43 层、4096 hidden、256 expert）
-- 对比 PyTorch 和 OpenVINO 的 greedy output
-- 记录追踪时间、IR 文件大小、推理延迟
-
----
+### 1.4 真实权重全量加载（需大内存机器）
+- 租云实例（AWS r7i.16xlarge 512GB ~$4/hr，一次转换 ~$10-20）
+- 或 Intel DevCloud / 社区协作
+- 转换完的 INT4 IR (~70-80GB) 下载回本机
 
 ## P2 — 锦上添花
 
-### 7. 基准测试 & 文档
-- 在真实权重上跑 perplexity benchmark（WikiText-2 或类似）
-- 对比 FP32 / INT8 / INT4 / MXFP4 的 perplexity 和推理速度
-- 更新 README 和 ARTICLE.md
+### 1.5 MTP (Multi-Token Prediction)
+- 没有 MTP 也是完整的 autoregressive LM，优先级低
 
-### 8. MTP (Multi-Token Prediction)
-- 可提升推理吞吐（speculative decoding 思路）
-- 没有 MTP 也是完整的 autoregressive LM
-
-### 9. Hash routing（前 3 层）
-- 真实 V4-Flash 前 3 层用 hash routing 而非标准 MoE routing
-- 用标准 routing 替代不影响正确性，只影响效率
+### 1.6 Hash routing（前 3 层）
+- 用标准 routing 替代不影响正确性，优先级低
 
 ---
 
-## 执行顺序（64GB 本机）
+# 方向二：Intel AI PC 推理引擎（64GB 跑真实 V4-Flash）
+
+目标：在 64GB 消费级笔记本上运行 284B 参数的 V4-Flash，利用 OpenVINO + NPU 做出 ds4/llama.cpp 做不到的差异化方案。
+
+## 核心思路
+
+V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
+**95% 以上的权重在任意时刻是冷的。** 不需要全部装进内存。
 
 ```
-1. KV cache / autoregressive decode（P0.1）← 现在开始
-   - 改 modeling → 改 convert 脚本 → toy 上验证生成
-2. MXFP4 量化验证（P0.2）
-   - 升级 OpenVINO → 改 quantize 脚本 → toy 上验证
-3. iGPU 验证（P0.3）
-   - compile_model("GPU") → 记录结果
-4. 等 upstream 回复 → PR（P1.4）
-5. 租云机器跑真实权重（P1.5-6）
+┌──────────── NPU (常驻, ~几MB) ─────────┐
+│  Expert Predictor：预测下一层 top-6     │
+│  → 异步通知 CPU prefetch               │
+│  低功耗，不占 CPU/内存带宽             │
+└────────────────────────────────────────┘
+          ↓ prefetch signal
+┌──────────── CPU + RAM (~55GB) ─────────┐
+│  Backbone (embed + attn + mHC): ~5GB   │
+│  Shared expert: ~0.5GB                 │
+│  Hot experts LRU cache: ~40GB INT4     │
+│  Cold expert INT2 fallback: ~10GB      │
+└────────────────────────────────────────┘
+          ↕ cache miss → async load
+┌──────────── NVMe SSD (~130GB) ─────────┐
+│  全部 256 experts @ INT4               │
+│  + INT2 shadow copies for fast fallback│
+└────────────────────────────────────────┘
 ```
+
+差异化优势（vs ds4 / llama.cpp）：
+- **NPU expert predictor**：零 CPU 开销的预测 + prefetch，Intel AI PC 独有
+- **混合精度 expert**：hot INT4 + cold INT2，内存占用更低
+- **OpenVINO 原生**：直接用 `compiled_model`，不需要手写 GEMM kernel
+- **speculative prefetch**：在当前层计算时异步加载下一层 expert
+
+## P0 — 基础设施
+
+### 2.1 模型拆分：backbone + expert 分离
+- 把 `modeling_deepseek_v4.py` 的 MoE 层拆成独立模块
+- backbone（embedding + attention + mHC + shared expert）→ 单独一个 IR
+- 每个 routed expert → 单独一个小 IR（或按 group 打包）
+- 在 toy 上验证拆分后数值一致性
+- **关键论文参考**：HOBBIT (arXiv:2411.01433)
+
+### 2.2 Expert offloading 基础版
+- backbone `compiled_model` 常驻内存
+- expert IR 存磁盘，按 router top-6 结果动态加载
+- LRU cache 管理已加载的 expert
+- 在 toy 上跑通完整推理流程
+- **目标**：先跑通，不追求速度
+
+### 2.3 真实权重分片转换
+- 改造 `load_real_v4_weights.py`：逐层 dequant → 逐 expert 写出 IR
+- 峰值内存控制在 ~30-40GB（一次只加载一个 expert 的权重）
+- **价值**：绕过 512GB 大机器的限制，64GB 上就能完成权重转换
+
+## P1 — 性能优化
+
+### 2.4 混合精度 Expert（HOBBIT 路线）
+- Hot expert (top ~32 by activation frequency): INT4
+- Cold expert (~224): INT2
+- 全部 INT4 ~130GB on disk → hot INT4 ~40GB in RAM + cold INT2 ~10GB in RAM
+- 需要 calibration 数据集跑 router 统计
+- **关键论文**：MxMoE (arXiv:2505.05799), MoPEQ (arXiv:2509.02512)
+
+### 2.5 Speculative Expert Prefetch
+- 用当前层的 hidden state / router logits 预测下一层的 top-k expert
+- 训练一个小型 predictor（几百 KB 参数）
+- OpenVINO `start_async` 重叠 prefetch I/O 和当前层计算
+- **关键论文**：DALI (arXiv:2602.03495), SP-MoE (arXiv:2510.10302)
+
+### 2.6 NPU Expert Predictor
+- 把 2.5 的 predictor 部署到 NPU
+- OpenVINO `compile_model(predictor, "NPU")`
+- NPU 低功耗常驻推理，不抢 CPU 资源和内存带宽
+- **价值**：Intel AI PC 独有能力，竞品做不到
+
+## P2 — 进阶
+
+### 2.7 Expert Pruning（可选）
+- 分析 router activation 统计，识别冗余 expert
+- 256 → 64 experts，MoE 参数量砍 75%
+- 需要 calibration + perplexity 评估
+- **关键论文**：MoE-Pruner (arXiv:2410.12013), SlimMoE (arXiv:2506.18349)
+
+### 2.8 Benchmark & 文档
+- perplexity 对比（full precision vs 混合精度 vs pruned）
+- 推理速度 benchmark（tok/s, 首 token 延迟）
+- 与 ds4 / llama.cpp 的对比
+- 更新 README 和 ARTICLE.md
+
+---
+
+# 执行顺序
+
+```
+方向一（toy PoC）         方向二（推理引擎）
+──────────────          ──────────────
+1.1 KV cache ←now       |
+1.2 MXFP4 验证          2.1 模型拆分（toy 上）
+      |                 2.2 Expert offloading（toy 上）
+      |                 2.3 真实权重分片转换
+1.3 upstream PR          2.4 混合精度
+      |                 2.5 Speculative prefetch
+1.4 云机器全量转换        2.6 NPU predictor
+```
+
+两个方向在 toy 阶段可以共享代码（modeling、config、权重映射），
+方向二的 2.1-2.2 可以复用方向一的 KV cache 成果。
