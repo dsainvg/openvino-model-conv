@@ -1,8 +1,13 @@
-"""Quantize the toy DeepSeek-V4 IR with NNCF (INT8 and INT4 weight compression).
+"""Quantize the toy DeepSeek-V4 IR with NNCF (INT8 / INT4 / MXFP4 weight compression).
 
 Loads the FP32 IR saved by convert_to_openvino.py, applies nncf.compress_weights
-in two modes (INT8 asym, INT4 asym), saves both, then reloads each variant on CPU
-and compares logits and greedy next-token vs the FP32 baseline.
+in three modes (INT8 asym, INT4 asym, MXFP4), saves each variant, then reloads on
+CPU and compares logits + greedy next-token vs the FP32 baseline.
+
+MXFP4 (microscaled FP4 — E2M1 + E8M0 scale) is a CPU-only OpenVINO 2026.0+ mode;
+groups of 32 elements share an 8-bit shared exponent. NNCF exposes it as
+CompressWeightsMode.MXFP4. Useful preview for the eventual ~140 GB real-V4 IR
+(half the size of INT8).
 """
 import sys
 from pathlib import Path
@@ -39,6 +44,7 @@ def main():
     fp32_ir = ROOT / "ov_ir_toy" / "deepseek_v4_toy.xml"
     int8_ir = ROOT / "ov_ir_toy" / "deepseek_v4_toy_int8.xml"
     int4_ir = ROOT / "ov_ir_toy" / "deepseek_v4_toy_int4.xml"
+    mxfp4_ir = ROOT / "ov_ir_toy" / "deepseek_v4_toy_mxfp4.xml"
 
     print("=== Baseline FP32 IR ===")
     fp32_logits = run_ir(fp32_ir, input_ids)
@@ -71,10 +77,26 @@ def main():
     print(f"  size: {file_size_mb(int4_ir):.2f} MB   greedy_top: {int4_top}  match_fp32={int4_top == fp32_top}")
     print(f"  abs diff vs FP32   max={diff4.max().item():.4e}  mean={diff4.mean().item():.4e}")
 
+    print("\n=== MXFP4 weight compression (E2M1 + E8M0 microscale, CPU-only, group_size=32) ===")
+    fp32_model = core.read_model(str(fp32_ir))
+    mxfp4_model = nncf.compress_weights(
+        fp32_model,
+        mode=nncf.CompressWeightsMode.MXFP4,
+        group_size=32,
+        ratio=1.0,
+    )
+    ov.save_model(mxfp4_model, str(mxfp4_ir), compress_to_fp16=False)
+    mxfp4_logits = run_ir(mxfp4_ir, input_ids)
+    mxfp4_top = int(mxfp4_logits[0, -1].argmax().item())
+    diff_mx = (fp32_logits.float() - mxfp4_logits.float()).abs()
+    print(f"  size: {file_size_mb(mxfp4_ir):.2f} MB   greedy_top: {mxfp4_top}  match_fp32={mxfp4_top == fp32_top}")
+    print(f"  abs diff vs FP32   max={diff_mx.max().item():.4e}  mean={diff_mx.mean().item():.4e}")
+
     print("\n=== Summary ===")
-    print(f"  FP32  {file_size_mb(fp32_ir):7.2f} MB  top={fp32_top}")
-    print(f"  INT8  {file_size_mb(int8_ir):7.2f} MB  top={int8_top}")
-    print(f"  INT4  {file_size_mb(int4_ir):7.2f} MB  top={int4_top}")
+    print(f"  FP32   {file_size_mb(fp32_ir):7.2f} MB  top={fp32_top}")
+    print(f"  INT8   {file_size_mb(int8_ir):7.2f} MB  top={int8_top}")
+    print(f"  INT4   {file_size_mb(int4_ir):7.2f} MB  top={int4_top}")
+    print(f"  MXFP4  {file_size_mb(mxfp4_ir):7.2f} MB  top={mxfp4_top}")
     print("\nQUANTIZATION: PASSED")
 
 

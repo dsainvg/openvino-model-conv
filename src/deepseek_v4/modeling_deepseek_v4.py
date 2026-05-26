@@ -3,8 +3,12 @@
 Differences from the reference:
 - Pure PyTorch. No TileLang kernels, no FP4/FP8 dtypes (BF16/FP32 throughout).
 - Single-rank: no torch.distributed; ParallelEmbedding/ColumnParallel/RowParallel are plain nn.Linear/nn.Embedding.
-- Prefill-only forward (start_pos=0, no incremental decode). KV cache buffers are used as transient
-  scratch tensors to keep parity with the reference attention shape.
+- KV cache is exposed via past_key_values: a list of per-layer Block-input tensors
+  [B, S_past, hc_mult, dim]. On decode (past given), each Block concatenates past+new along
+  the sequence dim internally so the K/V projection and compressor see the full history,
+  but Q is computed only for new positions and the block returns outputs only for new positions.
+  This is not perfectly O(1) per step (projection still scans the past) but it gives a faithful
+  cache API and avoids re-running the full stack per generated token.
 - Sparse attention is implemented via index-gather + dense softmax over the gathered slice.
   The "sparse" part is the indices selected by the indexer; the kernel itself is dense.
 - Sinkhorn balancing is an in-graph for loop with `hc_sinkhorn_iters` iterations.
@@ -13,7 +17,7 @@ Differences from the reference:
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -194,43 +198,47 @@ class Indexer(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        qr: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        x_full: torch.Tensor,
+        qr_new: torch.Tensor,
+        cos_full: torch.Tensor,
+        sin_full: torch.Tensor,
+        cos_new: torch.Tensor,
+        sin_new: torch.Tensor,
         offset: int,
+        seqlen_new: int,
     ) -> torch.Tensor:
-        """Returns topk_idxs: [B, S, index_topk] of int32. Indices reference positions in
-        the gathered-KV array starting from `offset`. Out-of-range positions are -1."""
-        bsz, seqlen, _ = x.size()
+        """Returns topk_idxs: [B, S_new, index_topk] of int32 — indexer scores for the LAST
+        `seqlen_new` positions of `x_full`. Indices reference positions in the gathered-KV
+        array starting from `offset`. Out-of-range positions are -1.
+
+        x_full / cos_full / sin_full cover the full sequence (past + new); qr_new / cos_new /
+        sin_new cover only the new tokens. When seqlen_new == x_full.size(1) this reduces to
+        the prefill path."""
+        bsz, seqlen_total, _ = x_full.size()
         ratio = self.compress_ratio
         rd = self.rope_dim
+        start_new = seqlen_total - seqlen_new
 
-        q = self.wq_b(qr).unflatten(-1, (self.n_heads, self.head_dim))  # [B, S, H, d]
-        # RoPE on last 2*rd dims of q.
-        q_rope = apply_rotary_emb_inplace_slice(q[..., -rd:], cos, sin)
+        q = self.wq_b(qr_new).unflatten(-1, (self.n_heads, self.head_dim))  # [B, S_new, H, d]
+        q_rope = apply_rotary_emb_inplace_slice(q[..., -rd:], cos_new, sin_new)
         q = torch.cat([q[..., : -rd], q_rope], dim=-1)
 
-        kv = self.compressor(x, cos, sin)  # [B, S/ratio, d]
-        weights = self.weights_proj(x).float() * (self.softmax_scale * self.n_heads ** -0.5)
+        kv = self.compressor(x_full, cos_full, sin_full)  # [B, S_total/ratio, d]
+        weights = self.weights_proj(x_full[:, start_new:]).float() * (self.softmax_scale * self.n_heads ** -0.5)
 
         # index_score[b, s, h, t] = q[b,s,h,:] · kv[b,t,:]
         index_score = torch.einsum("bshd,btd->bsht", q.float(), kv.float())
-        index_score = (F.relu(index_score) * weights.unsqueeze(-1)).sum(dim=2)  # [B, S, T]
+        index_score = (F.relu(index_score) * weights.unsqueeze(-1)).sum(dim=2)  # [B, S_new, T]
 
-        # Causal mask: position s can only attend to compressed-chunks with end <= s.
-        # Compressed position t corresponds to original positions [t*ratio, (t+1)*ratio).
-        # So token s sees t iff (t+1)*ratio <= s+1, i.e. t < (s+1)//ratio.
+        # Causal mask: absolute position s can only attend to compressed-chunks with end <= s.
         n_t = index_score.size(-1)
-        s_idx = torch.arange(seqlen, device=index_score.device)
+        s_idx = torch.arange(start_new, start_new + seqlen_new, device=index_score.device)
         t_idx = torch.arange(n_t, device=index_score.device)
-        # mask[s, t] == True means t is invalid for s
         mask = t_idx.unsqueeze(0) >= ((s_idx + 1) // ratio).unsqueeze(1)
         index_score = index_score.masked_fill(mask.unsqueeze(0), float("-inf"))
 
         k = min(self.index_topk, n_t)
-        topk_idxs = index_score.topk(k, dim=-1)[1]  # [B, S, k]
-        # Re-mask any topk picks that landed on invalid positions (when k > valid count).
+        topk_idxs = index_score.topk(k, dim=-1)[1]  # [B, S_new, k]
         invalid = topk_idxs >= ((s_idx + 1) // ratio).unsqueeze(0).unsqueeze(-1)
         topk_idxs = torch.where(invalid, torch.full_like(topk_idxs, -1), topk_idxs + offset)
         return topk_idxs.to(torch.int32)
@@ -239,25 +247,29 @@ class Indexer(nn.Module):
 # ------------------------------------------------------------------------------
 # Sliding-window topk indices (no learned scoring, just window-aligned)
 # ------------------------------------------------------------------------------
-def sliding_window_topk_idxs(window: int, bsz: int, seqlen: int, device) -> torch.Tensor:
-    """Returns [B, S, window] int32: for each position s, the in-window positions [s-window+1, s].
-    Out-of-range (negative) positions are -1."""
-    base = torch.arange(seqlen, device=device).unsqueeze(1)            # [S, 1]
-    win = torch.arange(window, device=device).unsqueeze(0)              # [1, W]
-    idxs = base - window + 1 + win                                      # [S, W]
+def sliding_window_topk_idxs(window: int, bsz: int, seqlen_total: int, seqlen_new: int, device) -> torch.Tensor:
+    """Returns [B, seqlen_new, window] int32: window indices for the last `seqlen_new`
+    positions of a sequence of length `seqlen_total`. Indices are absolute positions
+    in [0, seqlen_total). Out-of-range positions are -1."""
+    start = seqlen_total - seqlen_new
+    base = torch.arange(start, start + seqlen_new, device=device).unsqueeze(1)  # [S_new, 1]
+    win = torch.arange(window, device=device).unsqueeze(0)                       # [1, W]
+    idxs = base - window + 1 + win                                                # [S_new, W]
     idxs = torch.where(idxs < 0, torch.full_like(idxs, -1), idxs)
     idxs = torch.where(idxs > base, torch.full_like(idxs, -1), idxs)
     return idxs.unsqueeze(0).expand(bsz, -1, -1).to(torch.int32).contiguous()
 
 
-def dense_compress_topk_idxs(ratio: int, bsz: int, seqlen: int, offset: int, device) -> torch.Tensor:
-    """For ratio==128 (no learned indexer), select all causally-valid compressed positions."""
-    n_t = seqlen // ratio
-    s_idx = torch.arange(seqlen, device=device).unsqueeze(1)          # [S, 1]
-    t_idx = torch.arange(n_t, device=device).unsqueeze(0)              # [1, T]
+def dense_compress_topk_idxs(ratio: int, bsz: int, seqlen_total: int, seqlen_new: int, offset: int, device) -> torch.Tensor:
+    """For ratio==128 (no learned indexer), select all causally-valid compressed positions
+    for the last `seqlen_new` positions of a sequence of length `seqlen_total`."""
+    n_t = seqlen_total // ratio
+    start = seqlen_total - seqlen_new
+    s_idx = torch.arange(start, start + seqlen_new, device=device).unsqueeze(1)  # [S_new, 1]
+    t_idx = torch.arange(n_t, device=device).unsqueeze(0)                         # [1, T]
     valid = t_idx < ((s_idx + 1) // ratio)
     idxs = torch.where(valid, t_idx + offset, torch.full_like(t_idx, -1))
-    idxs = idxs.unsqueeze(0).expand(bsz, seqlen, -1).to(torch.int32).contiguous()
+    idxs = idxs.unsqueeze(0).expand(bsz, seqlen_new, -1).to(torch.int32).contiguous()
     return idxs
 
 
@@ -347,37 +359,52 @@ class Attention(nn.Module):
             self.compressor = None
             self.indexer = None
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        bsz, seqlen, _ = x.size()
+    def forward(
+        self,
+        x_full: torch.Tensor,
+        cos_full: torch.Tensor,
+        sin_full: torch.Tensor,
+        seqlen_new: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Run attention for the LAST `seqlen_new` positions of `x_full`. If `seqlen_new`
+        is None or equals `x_full.size(1)`, this is the prefill path (compute for all
+        positions). x_full / cos_full / sin_full always span the full sequence so that
+        the K/V projection and compressor see the full history."""
+        bsz, seqlen_total, _ = x_full.size()
+        if seqlen_new is None:
+            seqlen_new = seqlen_total
+        start_new = seqlen_total - seqlen_new
+        x_new = x_full[:, start_new:]
+        cos_new = cos_full[start_new:]
+        sin_new = sin_full[start_new:]
         rd = self.rope_dim
         win = self.window_size
 
-        # Q
-        qr = self.q_norm(self.wq_a(x))                                   # [B, S, q_lora]
-        q = self.wq_b(qr).unflatten(-1, (self.n_heads, self.head_dim))   # [B, S, H, d]
-        # Per-head RMSNorm (reference uses rsqrt(mean(x^2) + eps)).
+        # Q (new positions only)
+        qr = self.q_norm(self.wq_a(x_new))                                # [B, S_new, q_lora]
+        q = self.wq_b(qr).unflatten(-1, (self.n_heads, self.head_dim))    # [B, S_new, H, d]
         q = q * torch.rsqrt(q.float().pow(2).mean(-1, keepdim=True) + self.eps).to(q.dtype)
-        q_rope = apply_rotary_emb_inplace_slice(q[..., -rd:], cos, sin)
+        q_rope = apply_rotary_emb_inplace_slice(q[..., -rd:], cos_new, sin_new)
         q = torch.cat([q[..., : -rd], q_rope], dim=-1)
 
-        # K/V (shared, single head)
-        kv = self.wkv(x)                                                  # [B, S, d]
+        # K/V (full sequence, shared single head)
+        kv = self.wkv(x_full)                                              # [B, S_total, d]
         kv = self.kv_norm(kv)
-        kv_rope = apply_rotary_emb_inplace_slice(kv[..., -rd:], cos, sin)
+        kv_rope = apply_rotary_emb_inplace_slice(kv[..., -rd:], cos_full, sin_full)
         kv = torch.cat([kv[..., : -rd], kv_rope], dim=-1)
 
-        # Build the gather pool: [sliding-window kv] + (optional [compressed kv]).
-        # For simplicity in prefill, we use the full original kv as the window pool
-        # (sliding-window indices select the right subset).
-        win_idxs = sliding_window_topk_idxs(win, bsz, seqlen, x.device)
+        # Build the gather pool for new positions.
+        win_idxs = sliding_window_topk_idxs(win, bsz, seqlen_total, seqlen_new, x_full.device)
         if self.compress_ratio:
-            kv_compress = self.compressor(x, cos, sin)                    # [B, T, d]
+            kv_compress = self.compressor(x_full, cos_full, sin_full)     # [B, T, d]
             offset = kv.size(1)
             if self.indexer is not None:
-                comp_idxs = self.indexer(x, qr, cos, sin, offset)
+                comp_idxs = self.indexer(
+                    x_full, qr, cos_full, sin_full, cos_new, sin_new, offset, seqlen_new
+                )
             else:
                 comp_idxs = dense_compress_topk_idxs(
-                    self.compress_ratio, bsz, seqlen, offset, x.device
+                    self.compress_ratio, bsz, seqlen_total, seqlen_new, offset, x_full.device
                 )
             topk_idxs = torch.cat([win_idxs, comp_idxs], dim=-1)
             kv_pool = torch.cat([kv, kv_compress], dim=1)
@@ -387,14 +414,12 @@ class Attention(nn.Module):
 
         o = sparse_attn_dense(q, kv_pool, self.attn_sink, topk_idxs, self.softmax_scale)
         # Inverse RoPE on last 2*rd dims of o (reference applies conjugate freqs).
-        o_rope = apply_rotary_emb_inplace_slice(o[..., -rd:], cos, -sin)
+        o_rope = apply_rotary_emb_inplace_slice(o[..., -rd:], cos_new, -sin_new)
         o = torch.cat([o[..., : -rd], o_rope], dim=-1)
 
         # Output projection: grouped LoRA.
-        # wo_a is logically [n_groups, o_lora_rank, (n_heads*head_dim)/n_groups].
-        o = o.reshape(bsz, seqlen, self.n_groups, -1)                    # [B, S, G, head_chunk]
+        o = o.reshape(bsz, seqlen_new, self.n_groups, -1)                 # [B, S_new, G, head_chunk]
         wo_a = self.wo_a.weight.view(self.n_groups, self.o_lora_rank, -1)
-        # einsum: o[b,s,g,c] @ wo_a[g,r,c]^T = [b,s,g,r]
         o = torch.einsum("bsgc,grc->bsgr", o, wo_a)
         return self.wo_b(o.flatten(2))
 
@@ -578,21 +603,49 @@ class Block(nn.Module):
         from_res = torch.einsum("bskh,bskd->bshd", comb.float(), residual.float())
         return (new_branch.float() + from_res).to(x.dtype)
 
-    def forward(self, x: torch.Tensor, input_ids: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        # Attention sub-block
-        residual = x
-        y, post, comb = self._hc_pre(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
-        y = self.attn_norm(y)
-        y = self.attn(y, cos, sin)
-        x = self._hc_post(y, residual, post, comb)
+    def forward(
+        self,
+        x: torch.Tensor,
+        input_ids_new: torch.Tensor,
+        cos_full: torch.Tensor,
+        sin_full: torch.Tensor,
+        past_x: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """When past_x is None: prefill — `x` covers the full sequence; output also full.
+        When past_x is given: decode — `x` covers only new tokens (shape [B, S_new, H, dim]).
+        Internally we concat past+new to give the K/V projection and compressor full context,
+        but the returned block output covers only the new positions. Caller is responsible
+        for using `present_x` (returned) as the next call's `past_x`."""
+        # Always take the concat path so OpenVINO can trace past_x as a regular input.
+        # past_x with sequence length 0 yields the prefill behavior bit-for-bit.
+        if past_x is None:
+            past_x = x.new_zeros(x.size(0), 0, x.size(2), x.size(3))
+        x_full = torch.cat([past_x, x], dim=1)
+        seqlen_new = x.size(1)
+        present_x = x_full
 
-        # FFN sub-block
-        residual = x
-        y, post, comb = self._hc_pre(x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
-        y = self.ffn_norm(y)
-        y = self.ffn(y, input_ids)
-        x = self._hc_post(y, residual, post, comb)
-        return x
+        # Attention sub-block — pre-mix and norm over the full sequence.
+        y_full, post_full, comb_full = self._hc_pre(x_full, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        y_full = self.attn_norm(y_full)
+        y_new = self.attn(y_full, cos_full, sin_full, seqlen_new=seqlen_new)
+        # _hc_post mixes attention output back with residual; both must align to NEW positions only.
+        residual_new = x_full[:, -seqlen_new:]
+        post_new = post_full[:, -seqlen_new:]
+        comb_new = comb_full[:, -seqlen_new:]
+        x_new = self._hc_post(y_new, residual_new, post_new, comb_new)
+
+        # FFN sub-block — operates per-token, so we can run it on new positions only.
+        # But _hc_pre needs the full context to compute mixes consistent with prefill semantics?
+        # No: _hc_pre is per-position (no cross-position interaction), so running on new
+        # positions only is correct and matches prefill bit-for-bit.
+        y2, post2, comb2 = self._hc_pre(x_new, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        y2 = self.ffn_norm(y2)
+        y2 = self.ffn(y2, input_ids_new)
+        x_new = self._hc_post(y2, x_new, post2, comb2)
+
+        # Update present_x to reflect this layer's new INPUT-stream tokens.
+        # Caller will use this as past_x next call.
+        return x_new, present_x
 
 
 # ------------------------------------------------------------------------------
@@ -664,21 +717,39 @@ class DeepseekV4Model(DeepseekV4PreTrainedModel):
         input_ids: torch.LongTensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.Tensor]] = None,
+        use_cache: bool = False,
         **kwargs,
     ) -> BaseModelOutputWithPast:
-        bsz, seqlen = input_ids.shape
-        h = self.embed(input_ids)                                       # [B, S, dim]
-        # Expand to hc_mult copies — these are the "hyper-channels" carried through the stack.
-        h = h.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()  # [B, S, H, dim]
+        """`past_key_values` is a list of per-layer cached block inputs, each shape
+        [B, S_past, hc_mult, dim]. If given, `input_ids` is interpreted as new tokens only
+        and the model returns logits / last_hidden_state for those new positions. If
+        `use_cache=True`, the returned `past_key_values` contains the updated per-layer
+        inputs (length = num_hidden_layers, each [B, S_past + S_new, hc_mult, dim])."""
+        bsz, seqlen_new = input_ids.shape
+        seqlen_past = 0 if past_key_values is None else past_key_values[0].size(1)
+        seqlen_total = seqlen_past + seqlen_new
 
-        cos = self.rope_cos[:seqlen]                                    # [S, rope_dim/2]
-        sin = self.rope_sin[:seqlen]
-        for layer in self.layers:
-            h = layer(h, input_ids, cos, sin)
+        h = self.embed(input_ids)                                       # [B, S_new, dim]
+        h = h.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()  # [B, S_new, H, dim]
 
-        h = self._hc_head_reduce(h)                                     # [B, S, dim]
+        # RoPE for the full sequence; layers slice as needed.
+        cos_full = self.rope_cos[:seqlen_total]
+        sin_full = self.rope_sin[:seqlen_total]
+
+        present_key_values: List[torch.Tensor] = []
+        for i, layer in enumerate(self.layers):
+            past_x = None if past_key_values is None else past_key_values[i]
+            h, present_x = layer(h, input_ids, cos_full, sin_full, past_x=past_x)
+            if use_cache:
+                present_key_values.append(present_x)
+
+        h = self._hc_head_reduce(h)                                     # [B, S_new, dim]
         h = self.norm(h)
-        return BaseModelOutputWithPast(last_hidden_state=h)
+        return BaseModelOutputWithPast(
+            last_hidden_state=h,
+            past_key_values=present_key_values if use_cache else None,
+        )
 
 
 class DeepseekV4ForCausalLM(DeepseekV4PreTrainedModel):
@@ -703,9 +774,17 @@ class DeepseekV4ForCausalLM(DeepseekV4PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.Tensor]] = None,
+        use_cache: bool = False,
         **kwargs,
     ) -> CausalLMOutputWithPast:
-        out = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
+        out = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+        )
         logits = self.lm_head(out.last_hidden_state)
         loss = None
         if labels is not None:
@@ -716,4 +795,4 @@ class DeepseekV4ForCausalLM(DeepseekV4PreTrainedModel):
                 shift_labels.view(-1),
                 ignore_index=-100,
             )
-        return CausalLMOutputWithPast(loss=loss, logits=logits)
+        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=out.past_key_values)

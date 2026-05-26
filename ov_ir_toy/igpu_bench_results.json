@@ -1,0 +1,217 @@
+[
+  {
+    "ir": "deepseek_v4_toy.xml",
+    "label": "fp32_prefill",
+    "device": "CPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Core(TM) Ultra 9 285H",
+    "compile_ms": 1014.1649999986839,
+    "infer_ms": 20.49099000014394,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy.xml",
+    "label": "fp32_prefill",
+    "device": "GPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Arc(TM) 140T GPU (32GB) (iGPU)",
+    "compile_ms": 1979.1212000000087,
+    "infer_ms": 9.098760000051698,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "abs_max_vs_cpu": 0.05904403328895569,
+    "abs_mean_vs_cpu": 0.0004574932099785656,
+    "top_match_cpu": true,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_int8.xml",
+    "label": "int8_prefill",
+    "device": "CPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Core(TM) Ultra 9 285H",
+    "compile_ms": 1343.7914000005549,
+    "infer_ms": 22.965539999859175,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_int8.xml",
+    "label": "int8_prefill",
+    "device": "GPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Arc(TM) 140T GPU (32GB) (iGPU)",
+    "compile_ms": 2573.724999998376,
+    "infer_ms": 11.130539999976463,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "abs_max_vs_cpu": 0.14626002311706543,
+    "abs_mean_vs_cpu": 0.005418014246970415,
+    "top_match_cpu": true,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_int4.xml",
+    "label": "int4_prefill",
+    "device": "CPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Core(TM) Ultra 9 285H",
+    "compile_ms": 1336.5225000015926,
+    "infer_ms": 25.69235999999364,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_int4.xml",
+    "label": "int4_prefill",
+    "device": "GPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Arc(TM) 140T GPU (32GB) (iGPU)",
+    "compile_ms": 2611.9293000010657,
+    "infer_ms": 11.997949999931734,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "abs_max_vs_cpu": 0.14525268971920013,
+    "abs_mean_vs_cpu": 0.005263512954115868,
+    "top_match_cpu": true,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_mxfp4.xml",
+    "label": "mxfp4_prefill",
+    "device": "CPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Core(TM) Ultra 9 285H",
+    "compile_ms": 1379.37729999976,
+    "infer_ms": 33.64999999994325,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_mxfp4.xml",
+    "label": "mxfp4_prefill",
+    "device": "GPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Arc(TM) 140T GPU (32GB) (iGPU)",
+    "compile_ms": 1969.7162000011303,
+    "infer_ms": 8.76042999989295,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "logits_finite": true,
+    "greedy_top": 162,
+    "abs_max_vs_cpu": 0.13235799968242645,
+    "abs_mean_vs_cpu": 0.0007302034646272659,
+    "top_match_cpu": true,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_kv.xml",
+    "label": "kv_prefill",
+    "device": "CPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Core(TM) Ultra 9 285H",
+    "compile_ms": 1079.5594999999594,
+    "infer_ms": 46.03116666658025,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "greedy_top": 162,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_kv.xml",
+    "label": "kv_decode_step",
+    "device": "CPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Core(TM) Ultra 9 285H",
+    "compile_ms": 1079.5594999999594,
+    "infer_ms": 5.235499999980675,
+    "logits_shape": [
+      1,
+      1,
+      512
+    ],
+    "greedy_top": 148,
+    "status": "ok"
+  },
+  {
+    "ir": "deepseek_v4_toy_kv.xml",
+    "label": "kv_prefill",
+    "device": "GPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Arc(TM) 140T GPU (32GB) (iGPU)",
+    "compile_ms": 1981.606199999078,
+    "infer_ms": 9.330033333147489,
+    "logits_shape": [
+      1,
+      128,
+      512
+    ],
+    "greedy_top": 162,
+    "status": "ok",
+    "abs_max_vs_cpu": 0.05904403328895569,
+    "top_match_cpu": true
+  },
+  {
+    "ir": "deepseek_v4_toy_kv.xml",
+    "label": "kv_decode_step",
+    "device": "GPU",
+    "ov_version": "2026.1.0-21367-63e31528c62-releases/2026/1",
+    "device_full_name": "Intel(R) Arc(TM) 140T GPU (32GB) (iGPU)",
+    "compile_ms": 1981.606199999078,
+    "infer_ms": 10.620099999869126,
+    "logits_shape": [
+      1,
+      1,
+      512
+    ],
+    "greedy_top": 148,
+    "status": "ok",
+    "top_match_cpu": true
+  }
+]

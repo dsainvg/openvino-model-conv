@@ -18,20 +18,20 @@ Upstream issues filed:
 
 ## P0 — 立刻可做
 
-### 1.1 Autoregressive decode（KV cache）
-- 实现 `past_key_values` 输入/输出，支持逐 token 生成
-- 难点：V4 的 KV cache 结构**逐层不同**（sliding-window / ratio-4 compressed / ratio-128 compressed）
-- 改造 `modeling_deepseek_v4.py`：每个 attention 层返回各自形状的 KV cache
-- 改造 `convert_to_openvino.py`：追踪时带 `past_key_values` 动态输入
-- 移除 `use_cache=False` 限制
-- toy 模型上做 + 验证，不依赖真实权重
-- **价值**：从 "能跑 prefill" 到 "能生成文本"
+### 1.1 Autoregressive decode（KV cache） ✅ 2026-05-26
+- ✅ `modeling_deepseek_v4.py`: per-layer Block-input cache via `past_key_values`
+  (list of `[B, S_past, hc_mult, dim]`). Block always takes the concat path so the
+  same IR serves both prefill (S_past=0) and decode (S_past>0). Attention, Indexer,
+  and the topk-index helpers all take `seqlen_total / seqlen_new`.
+- ✅ `scripts/convert_to_openvino_kv.py`: traces L past inputs + L present outputs,
+  all dimensions dynamic. CPU prefill abs_max vs PT = 5.8e-2, greedy match.
+- ✅ `tests/test_kv_cache.py`: PyTorch prefill vs step-by-step decode equivalence
+  (abs_max 5e-7, greedy match across all decode steps).
 
-### 1.2 MXFP4 量化路径验证（toy 上）
-- OpenVINO 2026.0 已支持 `CompressWeightsMode.E2M1`（MXFP4 + E8M0 microscale, CPU only）
-- 改造 `scripts/quantize_with_nncf.py`：增加 MXFP4 量化路径
-- 在 toy IR 上验证 MXFP4 压缩 + 推理正确性
-- **价值**：为方向二和大机器真实权重铺路
+### 1.2 MXFP4 量化路径验证（toy 上） ✅ 2026-05-26
+- ✅ `scripts/quantize_with_nncf.py`: added `CompressWeightsMode.MXFP4` (E2M1 + E8M0
+  microscale, group_size=32). Toy sizes — FP32 6.46 MB / INT8 3.17 / INT4 2.85 /
+  **MXFP4 2.66 MB**; greedy top matches FP32 across all four modes.
 
 ## P1 — 等外部条件
 
@@ -58,6 +58,18 @@ Upstream issues filed:
 # 方向二：Intel AI PC 推理引擎（64GB 跑真实 V4-Flash）
 
 目标：在 64GB 消费级笔记本上运行 284B 参数的 V4-Flash，利用 OpenVINO + NPU 做出 ds4/llama.cpp 做不到的差异化方案。
+
+## 完成的基础验证
+
+### 2.0 Arc 140T iGPU 后端兼容性 ✅ 2026-05-26
+- ✅ `scripts/bench_igpu.py`: compile + run every IR on CPU and Arc 140T iGPU,
+  writes per-record JSON to `ov_ir_toy/igpu_bench_results.json`.
+- ✅ 12/12 records OK. CPU↔GPU greedy match on every IR (FP32 / INT8 / INT4 / MXFP4 / KV).
+- ✅ iGPU prefill 比 CPU 快 2-5×（MXFP4 prefill: 33.6 ms CPU → 8.8 ms GPU — 是所有
+  组合中最快的）。单 token decode 在 iGPU 上反而比 CPU 慢约 2×（开销摊不开）。
+- ✅ CPU↔GPU 数值漂移 abs_max ~5e-2 到 1.5e-1（iGPU FP16 路径的典型差异）。
+- **结论**：iGPU 作为方向二的 backbone 后端是可行的（prefill 快），decode 阶段
+  小 batch 选择留给 CPU/NPU。
 
 ## 核心思路
 
@@ -153,11 +165,11 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
 ```
 方向一（toy PoC）         方向二（推理引擎）
 ──────────────          ──────────────
-1.1 KV cache ←now       |
-1.2 MXFP4 验证          2.1 模型拆分（toy 上）
+1.1 KV cache ✅          2.0 iGPU 兼容性 ✅
+1.2 MXFP4 验证 ✅        2.1 模型拆分（toy 上）← next
       |                 2.2 Expert offloading（toy 上）
       |                 2.3 真实权重分片转换
-1.3 upstream PR          2.4 混合精度
+1.3 upstream PR ← next   2.4 混合精度
       |                 2.5 Speculative prefetch
 1.4 云机器全量转换        2.6 NPU predictor
 ```
