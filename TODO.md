@@ -140,11 +140,20 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
 
 ## P1 — 性能优化
 
-### 2.4 混合精度 Expert（HOBBIT 路线）
+### 2.4 混合精度 Expert（HOBBIT 路线） 🔧 IN PROGRESS
+- **Step 1**: `scripts/collect_expert_stats.py` ✅ — 收集 router 激活频率统计
+  - 支持 toy (PyTorch) / toy-ov (split IR) / real (V4-Flash split IR) 三种模式
+  - calibration 数据支持 random / wikitext / 自定义文件
+  - 输出 per-layer 和 global 的 hot/cold 分类 JSON
+- **Step 2**: `scripts/quantize_experts_mixed.py` ✅ — 混合精度量化
+  - Hot expert → INT4 (NNCF INT4_ASYM, group_size=32)
+  - Cold expert → INT4-tiny (NNCF INT4_SYM, group_size=8)
+  - 输出 manifest.json 记录每个 expert 的精度
+- **Step 3**: 更新 offload 编排器支持混合精度 ← next (待 Step 1-2 在开发机验证后)
+- **Step 4**: 端到端验证 (logits 漂移 + 内存峰值 + 推理延迟)
 - Hot expert (top ~32 by activation frequency): INT4
-- Cold expert (~224): INT2
-- 全部 INT4 ~130GB on disk → hot INT4 ~40GB in RAM + cold INT2 ~10GB in RAM
-- 需要 calibration 数据集跑 router 统计
+- Cold expert (~224): INT4-tiny (极小 group_size)
+- 全部 INT4 ~130GB on disk → hot INT4 ~40GB in RAM + cold INT4-tiny ~20GB in RAM
 - **关键论文**：MxMoE (arXiv:2505.05799), MoPEQ (arXiv:2509.02512)
 
 ### 2.5 Speculative Expert Prefetch
