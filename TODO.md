@@ -140,20 +140,29 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
 
 ## P1 — 性能优化
 
-### 2.4 混合精度 Expert（HOBBIT 路线） 🔧 IN PROGRESS
-- **Step 1**: `scripts/collect_expert_stats.py` ✅ — 收集 router 激活频率统计
-  - 支持 toy (PyTorch) / toy-ov (split IR) / real (V4-Flash split IR) 三种模式
-  - calibration 数据支持 random / wikitext / 自定义文件
-  - 输出 per-layer 和 global 的 hot/cold 分类 JSON
-- **Step 2**: `scripts/quantize_experts_mixed.py` ✅ — 混合精度量化
-  - Hot expert → INT4 (NNCF INT4_ASYM, group_size=32)
-  - Cold expert → INT4-tiny (NNCF INT4_SYM, group_size=8)
-  - 输出 manifest.json 记录每个 expert 的精度
-- **Step 3**: 更新 offload 编排器支持混合精度 ← next (待 Step 1-2 在开发机验证后)
-- **Step 4**: 端到端验证 (logits 漂移 + 内存峰值 + 推理延迟)
-- Hot expert (top ~32 by activation frequency): INT4
-- Cold expert (~224): INT4-tiny (极小 group_size)
-- 全部 INT4 ~130GB on disk → hot INT4 ~40GB in RAM + cold INT4-tiny ~20GB in RAM
+### 2.4 混合精度 Expert（HOBBIT 路线） ✅ 2026-05-27
+- ✅ `scripts/mixed_precision_experts.py`: end-to-end pipeline in one script
+  (Steps 1-4 fused for the toy validation).
+  - **Step 1 — calibrate**: runs N random inputs through the split orchestrator,
+    counts per-(layer, expert) selections. Writes
+    `ov_ir_toy/expert_split_mixed/calibration.json` with per_layer_counts +
+    tier assignment so a downstream NPU predictor / warm-cache loader can
+    consume the same stats without re-running calibration.
+  - **Step 2 — quantize**: applies NNCF per-expert. Toy uses INT8 hot / INT4
+    cold (NNCF 3.1.0 lacks an INT2 mode, so this is the two-tier proxy on
+    this stack; swapping cold → MXFP4 / NF4 / packed INT2 is a one-line
+    `CompressWeightsMode` change once the lower-precision variant is wired).
+  - **Step 3 — orchestrate**: reuses 2.2's pattern; the mixed-precision IRs
+    live in `ov_ir_toy/expert_split_mixed/` alongside copies of the FP32
+    backbone segments so a single directory drives everything.
+  - **Step 4 — validate**: greedy match vs monolithic OV.
+- ✅ Toy result: 16 hot (INT8) + 16 cold (INT4) per the 4-layer × 8-expert toy.
+  Per-expert size FP32 ≈ 102 KB → INT8 hot ≈ 41 KB / INT4 cold ≈ 36 KB.
+  Total experts: 3261 KB FP32 → 1227 KB mixed (**62.4% reduction**).
+  Logits abs diff vs monolithic max 1.84e-1 mean 7.5e-3; greedy top match.
+- 真实 V4-Flash 推算：calibration 在真实权重上会有非常不均匀的分布
+  （toy 随机权重 8 个 expert 都 ~256 selections，所以 hot/cold 选择是任意的；
+  真实模型预期 hot:cold ≈ 10:1 频次比）。
 - **关键论文**：MxMoE (arXiv:2505.05799), MoPEQ (arXiv:2509.02512)
 
 ### 2.5 Speculative Expert Prefetch
@@ -193,8 +202,8 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
 1.2 MXFP4 验证 ✅        2.1 模型拆分 ✅
       |                 2.2 Expert offloading ✅
       |                 2.3 真实权重分片转换 ✅
-1.3 upstream PR ← next   2.4 混合精度 ← next
-      |                 2.5 Speculative prefetch
+1.3 upstream PR ← next   2.4 混合精度 ✅
+      |                 2.5 Speculative prefetch ← next
 1.4 云机器全量转换        2.6 NPU predictor
 ```
 

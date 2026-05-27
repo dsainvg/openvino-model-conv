@@ -1,0 +1,631 @@
+<?xml version="1.0"?>
+<net name="Model108" version="11">
+	<layers>
+		<layer id="0" name="x_flat" type="Parameter" version="opset1">
+			<data shape="?,128" element_type="f32" />
+			<output>
+				<port id="0" precision="FP32" names="x_flat">
+					<dim>-1</dim>
+					<dim>128</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="1" name="self.expert.w1.weight" type="Const" version="opset1">
+			<data element_type="u4" shape="64, 4, 32" offset="0" size="4096" />
+			<output>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="2" name="Convert_357367" type="Convert" version="opset1">
+			<data destination_type="f16" />
+			<input>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="3" name="self.expert.w1.weight/zero_point" type="Const" version="opset1">
+			<data element_type="u4" shape="64, 4, 1" offset="4096" size="128" />
+			<output>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="4" name="Convert_357369" type="Convert" version="opset1">
+			<data destination_type="f16" />
+			<input>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="5" name="self.expert.w1.weight/zero_point/subtract" type="Subtract" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="6" name="self.expert.w1.weight/scale" type="Const" version="opset1">
+			<data element_type="f16" shape="64, 4, 1" offset="4224" size="512" />
+			<output>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="7" name="self.expert.w1.weight/fq_weights_1" type="Multiply" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="8" name="Constant_357374" type="Const" version="opset1">
+			<data element_type="i64" shape="2" offset="4736" size="16" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>2</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="9" name="Reshape_357375" type="Reshape" version="opset1">
+			<data special_zero="false" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>2</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="10" name="self.expert.w1.weight/fq_weights_1/convert" type="Convert" version="opset1">
+			<data destination_type="f32" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="11" name="__module.expert.w1/aten::linear/MatMul" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="13,14,gate">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="12" name="Constant_162236" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 1" offset="4752" size="4" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="13" name="__module.expert/aten::clamp/Minimum" type="Minimum" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="19,input.1">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="14" name="__module.expert/aten::silu/Swish" type="Swish" version="opset4">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="20">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="15" name="self.expert.w3.weight" type="Const" version="opset1">
+			<data element_type="u4" shape="64, 4, 32" offset="4756" size="4096" />
+			<output>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="16" name="Convert_357356" type="Convert" version="opset1">
+			<data destination_type="f16" />
+			<input>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="17" name="self.expert.w3.weight/zero_point" type="Const" version="opset1">
+			<data element_type="u4" shape="64, 4, 1" offset="8852" size="128" />
+			<output>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="18" name="Convert_357358" type="Convert" version="opset1">
+			<data destination_type="f16" />
+			<input>
+				<port id="0" precision="U4">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="19" name="self.expert.w3.weight/zero_point/subtract" type="Subtract" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="20" name="self.expert.w3.weight/scale" type="Const" version="opset1">
+			<data element_type="f16" shape="64, 4, 1" offset="8980" size="512" />
+			<output>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="21" name="self.expert.w3.weight/fq_weights_1" type="Multiply" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="22" name="Constant_357363" type="Const" version="opset1">
+			<data element_type="i64" shape="2" offset="4736" size="16" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>2</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="23" name="Reshape_357364" type="Reshape" version="opset1">
+			<data special_zero="false" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>4</dim>
+					<dim>32</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>2</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="24" name="self.expert.w3.weight/fq_weights_1/convert" type="Convert" version="opset1">
+			<data destination_type="f32" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="25" name="__module.expert.w3/aten::linear/MatMul" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>64</dim>
+					<dim>128</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="16,17,up.1">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="26" name="__module.expert/aten::clamp/Minimum_1" type="Clamp" version="opset1">
+			<data min="-10" max="10" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32" names="18,up">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="27" name="__module.expert/aten::mul/Multiply" type="Multiply" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="21,22,h,input">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="28" name="self.expert.w2.weight" type="Const" version="opset1">
+			<data element_type="u8" shape="128, 64" offset="9492" size="8192" />
+			<output>
+				<port id="0" precision="U8">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="29" name="Convert_357379" type="Convert" version="opset1">
+			<data destination_type="f16" />
+			<input>
+				<port id="0" precision="U8">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP16">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="30" name="self.expert.w2.weight/zero_point" type="Const" version="opset1">
+			<data element_type="u8" shape="128, 1" offset="17684" size="128" />
+			<output>
+				<port id="0" precision="U8">
+					<dim>128</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="31" name="Convert_357382" type="Convert" version="opset1">
+			<data destination_type="f16" />
+			<input>
+				<port id="0" precision="U8">
+					<dim>128</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP16">
+					<dim>128</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="32" name="self.expert.w2.weight/zero_point/subtract" type="Subtract" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+				<port id="1" precision="FP16">
+					<dim>128</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="33" name="self.expert.w2.weight/scale" type="Const" version="opset1">
+			<data element_type="f16" shape="128, 1" offset="17812" size="256" />
+			<output>
+				<port id="0" precision="FP16">
+					<dim>128</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="34" name="self.expert.w2.weight/fq_weights_1" type="Multiply" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+				<port id="1" precision="FP16">
+					<dim>128</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP16">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="35" name="self.expert.w2.weight/fq_weights_1/convert" type="Convert" version="opset1">
+			<data destination_type="f32" />
+			<input>
+				<port id="0" precision="FP16">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="36" name="__module.expert.w2/aten::linear/MatMul" type="MatMul" version="opset1">
+			<data transpose_a="false" transpose_b="true" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>128</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="expert_out">
+					<dim>-1</dim>
+					<dim>128</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="37" name="Result_160135" type="Result" version="opset1" output_names="expert_out">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+				</port>
+			</input>
+		</layer>
+	</layers>
+	<edges>
+		<edge from-layer="0" from-port="0" to-layer="11" to-port="0" />
+		<edge from-layer="0" from-port="0" to-layer="25" to-port="0" />
+		<edge from-layer="1" from-port="0" to-layer="2" to-port="0" />
+		<edge from-layer="2" from-port="1" to-layer="5" to-port="0" />
+		<edge from-layer="3" from-port="0" to-layer="4" to-port="0" />
+		<edge from-layer="4" from-port="1" to-layer="5" to-port="1" />
+		<edge from-layer="5" from-port="2" to-layer="7" to-port="0" />
+		<edge from-layer="6" from-port="0" to-layer="7" to-port="1" />
+		<edge from-layer="7" from-port="2" to-layer="9" to-port="0" />
+		<edge from-layer="8" from-port="0" to-layer="9" to-port="1" />
+		<edge from-layer="9" from-port="2" to-layer="10" to-port="0" />
+		<edge from-layer="10" from-port="1" to-layer="11" to-port="1" />
+		<edge from-layer="11" from-port="2" to-layer="13" to-port="0" />
+		<edge from-layer="12" from-port="0" to-layer="13" to-port="1" />
+		<edge from-layer="13" from-port="2" to-layer="14" to-port="0" />
+		<edge from-layer="14" from-port="1" to-layer="27" to-port="0" />
+		<edge from-layer="15" from-port="0" to-layer="16" to-port="0" />
+		<edge from-layer="16" from-port="1" to-layer="19" to-port="0" />
+		<edge from-layer="17" from-port="0" to-layer="18" to-port="0" />
+		<edge from-layer="18" from-port="1" to-layer="19" to-port="1" />
+		<edge from-layer="19" from-port="2" to-layer="21" to-port="0" />
+		<edge from-layer="20" from-port="0" to-layer="21" to-port="1" />
+		<edge from-layer="21" from-port="2" to-layer="23" to-port="0" />
+		<edge from-layer="22" from-port="0" to-layer="23" to-port="1" />
+		<edge from-layer="23" from-port="2" to-layer="24" to-port="0" />
+		<edge from-layer="24" from-port="1" to-layer="25" to-port="1" />
+		<edge from-layer="25" from-port="2" to-layer="26" to-port="0" />
+		<edge from-layer="26" from-port="1" to-layer="27" to-port="1" />
+		<edge from-layer="27" from-port="2" to-layer="36" to-port="0" />
+		<edge from-layer="28" from-port="0" to-layer="29" to-port="0" />
+		<edge from-layer="29" from-port="1" to-layer="32" to-port="0" />
+		<edge from-layer="30" from-port="0" to-layer="31" to-port="0" />
+		<edge from-layer="31" from-port="1" to-layer="32" to-port="1" />
+		<edge from-layer="32" from-port="2" to-layer="34" to-port="0" />
+		<edge from-layer="33" from-port="0" to-layer="34" to-port="1" />
+		<edge from-layer="34" from-port="2" to-layer="35" to-port="0" />
+		<edge from-layer="35" from-port="1" to-layer="36" to-port="1" />
+		<edge from-layer="36" from-port="2" to-layer="37" to-port="0" />
+	</edges>
+	<rt_info>
+		<Runtime_version value="2026.1.0-21367-63e31528c62-releases/2026/1" />
+		<conversion_parameters>
+			<framework value="pytorch" />
+			<is_python_object value="True" />
+		</conversion_parameters>
+		<nncf>
+			<friendly_names_were_updated value="True" />
+			<version value="3.1.0" />
+			<weight_compression>
+				<advanced_parameters value="{'statistics_path': None, 'lora_adapter_rank': 256, 'group_size_fallback_mode': 'error', 'min_adjusted_group_size': 32, 'awq_params': {'subset_size': 32, 'percent_to_apply': 0.002, 'alpha_min': 0.0, 'alpha_max': 1.0, 'steps': 100, 'prefer_data_aware_scaling': True}, 'scale_estimation_params': {'subset_size': 64, 'initial_steps': 5, 'scale_steps': 5, 'weight_penalty': -1.0}, 'gptq_params': {'damp_percent': 0.1, 'block_size': 128, 'subset_size': 128}, 'lora_correction_params': {'adapter_rank': 8, 'num_iterations': 3, 'apply_regularization': True, 'subset_size': 128, 'use_int8_adapters': True}, 'backend_params': {}, 'codebook': None, 'adaptive_codebook_params': {'value_type': 'f8e4m3', 'across_blocks': False, 'num_elements': 16}}" />
+				<all_layers value="False" />
+				<awq value="False" />
+				<backup_mode value="int8_asym" />
+				<compression_format value="dequantize" />
+				<gptq value="False" />
+				<group_size value="32" />
+				<ignored_scope value="[]" />
+				<lora_correction value="False" />
+				<mode value="int4_asym" />
+				<ratio value="1.0" />
+				<scale_estimation value="False" />
+				<sensitivity_metric value="weight_quantization_error" />
+			</weight_compression>
+		</nncf>
+	</rt_info>
+</net>
