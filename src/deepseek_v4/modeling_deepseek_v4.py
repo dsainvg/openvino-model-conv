@@ -666,6 +666,16 @@ class DeepseekV4PreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
         elif isinstance(module, RMSNorm):
             module.weight.data.fill_(1.0)
+        elif isinstance(module, Gate):
+            # gate.weight is a bare Parameter (not an nn.Linear); init like a Linear weight.
+            module.weight.data.normal_(mean=0.0, std=std)
+        elif isinstance(module, Block):
+            # HC mix matrices were declared via torch.empty (uninitialized memory across
+            # runs — caused non-deterministic forward outputs); init like Linear weights.
+            module.hc_attn_fn.data.normal_(mean=0.0, std=std)
+            module.hc_ffn_fn.data.normal_(mean=0.0, std=std)
+        elif isinstance(module, DeepseekV4Model):
+            module.hc_head_fn.data.normal_(mean=0.0, std=std)
 
 
 class DeepseekV4Model(DeepseekV4PreTrainedModel):

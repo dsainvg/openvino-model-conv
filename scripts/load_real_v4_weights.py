@@ -5,18 +5,38 @@ Real V4-Flash:
       with E8M0-microscaled per-block scales)
     - dequantizing to BF16 needs roughly 500 GB of host RAM
 
-This 64GB host cannot run the full load. The loader is written and the dequant
-logic is verified on synthetic tensors (see tests/test_dequant.py). On a host
-with enough RAM, the entry point is:
+Three operating modes:
 
-    python scripts/load_real_v4_weights.py \\
+1. `--dry-run` — reads only `model.safetensors.index.json` to verify that every
+   real-V4 parameter name maps to a valid slot in our PyTorch module tree (or is
+   on the explicit skip list). No tensor loading. Always safe.
+
+2. (default) `--full-bf16` — full shard-by-shard dequantization to BF16
+   safetensors. Peak RAM ~500 GB; will OOM on this 64 GB host. Documented for
+   the cloud / large-RAM box.
+
+3. `--per-expert-ir` — Direction-2 path. Loads + dequantizes ONE expert at a
+   time, builds a tiny per-expert PyTorch module, traces with `ov.convert_model`,
+   writes the IR to disk, frees memory. Backbone (non-expert) weights are
+   collected into a single BF16 safetensors. Peak RAM ~5-10 GB (backbone + one
+   expert), fits comfortably on a 64 GB host. Output layout:
+
+       <output>/backbone.safetensors           BF16 backbone params
+       <output>/expert_L{i}_E{e}.{xml,bin}     one IR per routed expert (43*256
+                                                = 11008 IRs for real V4-Flash)
+
+   See scripts/split_to_expert_irs.py for the toy version that built the
+   same per-expert IR shape from a synthetic in-memory model — the layout here
+   is intentionally identical so scripts/run_with_expert_offload.py can drive
+   either source.
+
+The dequant logic is verified on synthetic tensors in tests/test_dequant.py.
+Entry point:
+
+    python scripts/load_real_v4_weights.py --dry-run
+    python scripts/load_real_v4_weights.py --per-expert-ir \\
         --weights-dir /path/to/DeepSeek-V4-Flash \\
-        --output       /path/to/output_dir
-
-A `--dry-run` mode reads only `model.safetensors.index.json` to verify that every
-real-V4 parameter name maps to a valid slot in our PyTorch module tree (or is on
-the explicit skip list — MTP blocks and hash-routing tables, which the toy port
-does not implement). Run this before kicking off the full load.
+        --output      /path/to/output_dir
 """
 import argparse
 import json
@@ -268,14 +288,227 @@ def full_load(
     print(f"\n  Summary: {summary}")
 
 
+# ---------------------------------------------------------------------------
+# Per-expert streaming IR conversion (Direction 2 / 2.3)
+# ---------------------------------------------------------------------------
+
+# A routed-expert key looks like: layers.{i}.ffn.experts.{e}.{w1|w2|w3}.weight
+EXPERT_KEY = re.compile(
+    r"^layers\.(?P<layer>\d+)\.ffn\.experts\.(?P<expert>\d+)\.(?P<proj>w1|w2|w3)\.weight$"
+)
+
+
+def _enumerate_experts(weight_map: Dict[str, str]):
+    """Return {(layer, expert): {w1: shard, w2: shard, w3: shard, scales:[...]}}."""
+    experts: Dict[Tuple[int, int], Dict[str, str]] = defaultdict(dict)
+    for k, shard in weight_map.items():
+        m = EXPERT_KEY.match(k)
+        if not m:
+            continue
+        L = int(m["layer"])
+        E = int(m["expert"])
+        experts[(L, E)][m["proj"]] = shard
+        scale = k.replace(".weight", ".scale")
+        if scale in weight_map:
+            experts[(L, E)].setdefault("_scale_shards", {})[m["proj"]] = weight_map[scale]
+    return experts
+
+
+def _load_expert_tensors(
+    weights_dir: Path,
+    layer: int,
+    expert: int,
+    shard_for: Dict[str, str],
+    target_dtype: torch.dtype,
+) -> Dict[str, torch.Tensor]:
+    """Load w1/w2/w3 for one (layer, expert), dequantizing FP4 with paired scales.
+
+    Returns {"w1": [inter, hidden], "w2": [hidden, inter], "w3": [inter, hidden]} in
+    target_dtype. Each .safe_open context closes immediately after use so peak
+    extra RAM is one expert's worth (~120 MB for real V4-Flash: 3 * 2048 * 4096
+    * 2 bytes BF16 = ~50 MB; FP4 raw is half that on disk).
+    """
+    from safetensors.torch import safe_open
+
+    out: Dict[str, torch.Tensor] = {}
+    for proj in ("w1", "w2", "w3"):
+        key = f"layers.{layer}.ffn.experts.{expert}.{proj}.weight"
+        scale_key = key.replace(".weight", ".scale")
+        weight_shard = shard_for[proj]
+        with safe_open(weights_dir / weight_shard, framework="pt", device="cpu") as f:
+            w = f.get_tensor(key)
+            try:
+                s = f.get_tensor(scale_key)
+                same_shard = True
+            except Exception:
+                s = None
+                same_shard = False
+        if s is None:
+            scale_shards = shard_for.get("_scale_shards", {})
+            if proj in scale_shards:
+                with safe_open(weights_dir / scale_shards[proj], framework="pt", device="cpu") as g:
+                    s = g.get_tensor(scale_key)
+        if s is None:
+            # Plain BF16 weight (no microscale).
+            out[proj] = w.to(target_dtype)
+            continue
+        if w.dtype == torch.int8 and w.size(-1) * 2 // 32 == s.size(-1):
+            deq = dequant_fp4(w, s)
+        else:
+            deq = dequant_fp8(w, s)
+        out[proj] = deq.to(target_dtype)
+        del w, s, deq
+    return out
+
+
+def _convert_expert_to_ir(
+    weights: Dict[str, torch.Tensor],
+    swiglu_limit: float,
+    hidden_size: int,
+    inter_size: int,
+    out_path: Path,
+) -> None:
+    """Build an Expert nn.Module, load the dequantized weights, trace to IR."""
+    from deepseek_v4.modeling_deepseek_v4 import Expert
+    import openvino as ov
+
+    expert = Expert(hidden_size, inter_size, swiglu_limit).eval()
+    expert.w1.weight.data = weights["w1"].float()
+    expert.w2.weight.data = weights["w2"].float()
+    expert.w3.weight.data = weights["w3"].float()
+
+    example = torch.zeros(1, hidden_size, dtype=torch.float32)
+    ov_model = ov.convert_model(
+        expert,
+        example_input=(example,),
+        input=[([-1, hidden_size], ov.Type.f32)],
+    )
+    ov_model.outputs[0].set_names({"expert_out"})
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ov.save_model(ov_model, str(out_path), compress_to_fp16=False)
+
+
+def full_load_per_expert_ir(
+    weights_dir: Path,
+    output_dir: Path,
+    target_dtype: torch.dtype = torch.bfloat16,
+    skip_existing: bool = True,
+    max_experts: Optional[int] = None,
+) -> None:
+    """Stream V4-Flash → one IR per routed expert, plus a single backbone BF16
+    safetensors. Peak RAM ≈ backbone (~5 GB) + one expert (~few hundred MB).
+
+    `max_experts` caps the number of experts processed (useful for smoke testing
+    on a partial download).
+    """
+    from safetensors.torch import safe_open, save_file
+
+    index_path = weights_dir / "model.safetensors.index.json"
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map: Dict[str, str] = index["weight_map"]
+
+    # Read config.json so we know hidden_size / moe_intermediate_size / swiglu_limit.
+    cfg_path = weights_dir / "config.json"
+    with open(cfg_path) as f:
+        real_cfg = json.load(f)
+    hidden_size = real_cfg["hidden_size"]
+    inter_size = real_cfg["moe_intermediate_size"]
+    swiglu_limit = real_cfg.get("swiglu_limit", 10.0)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    expert_dir = output_dir
+    backbone_path = output_dir / "backbone.safetensors"
+
+    # Enumerate experts and stream-convert each.
+    experts = _enumerate_experts(weight_map)
+    print(f"  {len(experts)} routed-expert (layer, idx) pairs to convert")
+    print(f"  hidden_size={hidden_size}  moe_intermediate_size={inter_size}  swiglu_limit={swiglu_limit}")
+
+    processed = 0
+    for (layer, expert), shard_for in sorted(experts.items()):
+        out_path = expert_dir / f"expert_L{layer}_E{expert}.xml"
+        if skip_existing and out_path.exists():
+            processed += 1
+            continue
+        weights = _load_expert_tensors(weights_dir, layer, expert, shard_for, target_dtype)
+        _convert_expert_to_ir(weights, swiglu_limit, hidden_size, inter_size, out_path)
+        del weights
+        processed += 1
+        if processed % 64 == 0:
+            print(f"    [{processed}/{len(experts)}] L{layer} E{expert} -> {out_path.name}")
+        if max_experts is not None and processed >= max_experts:
+            print(f"    stopped at max_experts={max_experts}")
+            break
+    print(f"  total experts converted: {processed}")
+
+    # Backbone: everything that is NOT an expert weight or expert scale. One pass
+    # over shards, collect into a single dict, save once. This is the only step
+    # whose peak is roughly the full backbone size (~5 GB) — well within 64 GB.
+    if backbone_path.exists() and skip_existing:
+        print(f"  [skip] backbone safetensors already at {backbone_path}")
+        return
+
+    print(f"  loading backbone (non-expert) weights...")
+    shards: Dict[str, list] = defaultdict(list)
+    for k, shard in weight_map.items():
+        if EXPERT_KEY.match(k):
+            continue
+        if k.endswith(".scale") and EXPERT_KEY.match(k.replace(".scale", ".weight")):
+            continue
+        shards[shard].append(k)
+
+    scale_to_shard = {k: v for k, v in weight_map.items() if k.endswith(".scale")}
+    backbone: Dict[str, torch.Tensor] = {}
+    summary = {"fp4": 0, "fp8": 0, "passthrough": 0, "skipped": 0}
+    for shard_name, keys in sorted(shards.items()):
+        print(f"    [load] {shard_name} ({len(keys)} backbone tensors)")
+        with safe_open(weights_dir / shard_name, framework="pt", device="cpu") as f:
+            handled = set()
+            for k in keys:
+                if k in handled or k.endswith(".scale"):
+                    continue
+                mapped = map_real_to_ours(k)
+                if mapped is None:
+                    summary["skipped"] += 1
+                    continue
+                scale_name = k.replace(".weight", ".scale")
+                if scale_name in scale_to_shard:
+                    weight = f.get_tensor(k)
+                    if scale_to_shard[scale_name] == shard_name:
+                        scale = f.get_tensor(scale_name)
+                        handled.add(scale_name)
+                    else:
+                        with safe_open(weights_dir / scale_to_shard[scale_name], framework="pt", device="cpu") as g:
+                            scale = g.get_tensor(scale_name)
+                    if weight.dtype == torch.int8 and weight.size(-1) * 2 // 32 == scale.size(-1):
+                        deq = dequant_fp4(weight, scale)
+                        summary["fp4"] += 1
+                    else:
+                        deq = dequant_fp8(weight, scale)
+                        summary["fp8"] += 1
+                    backbone[mapped] = deq.to(target_dtype)
+                    del weight, scale, deq
+                else:
+                    backbone[mapped] = f.get_tensor(k).to(target_dtype)
+                    summary["passthrough"] += 1
+    print(f"  backbone summary: {summary}, total tensors={len(backbone)}")
+    save_file(backbone, str(backbone_path))
+    print(f"  wrote {backbone_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights-dir", type=Path, default=ROOT / "v4_flash_meta",
                         help="Directory containing model.safetensors.index.json (and shards for full mode).")
     parser.add_argument("--output", type=Path, default=ROOT / "v4_flash_bf16",
-                        help="Output directory for dequantized BF16 shards (full mode only).")
+                        help="Output directory for dequantized BF16 shards or per-expert IRs.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Read only index.json and verify name coverage. No tensor loading.")
+    parser.add_argument("--per-expert-ir", action="store_true",
+                        help="Direction-2 streaming mode: emit one IR per routed expert + a single backbone safetensors. Peak RAM ~5-10 GB.")
+    parser.add_argument("--max-experts", type=int, default=None,
+                        help="(per-expert-ir mode) Stop after N experts. Useful for partial downloads / smoke testing.")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -285,6 +518,13 @@ def main():
             print("\nFAIL: unmapped keys remain")
             sys.exit(1)
         print("\nDRY-RUN: PASSED")
+        return
+
+    if args.per_expert_ir:
+        print(f"=== Per-expert IR streaming: {args.weights_dir} -> {args.output} ===")
+        print("Peak RAM ~5-10 GB. Output: one .xml/.bin per expert + backbone.safetensors.")
+        full_load_per_expert_ir(args.weights_dir, args.output, max_experts=args.max_experts)
+        print("\nPER-EXPERT-IR LOAD: PASSED")
         return
 
     print(f"=== Full load from {args.weights_dir} -> {args.output} ===")

@@ -102,26 +102,41 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
 - **OpenVINO 原生**：直接用 `compiled_model`，不需要手写 GEMM kernel
 - **speculative prefetch**：在当前层计算时异步加载下一层 expert
 
-## P0 — 基础设施
+## P0 — 基础设施 ✅ DONE (2026-05-26)
 
-### 2.1 模型拆分：backbone + expert 分离
-- 把 `modeling_deepseek_v4.py` 的 MoE 层拆成独立模块
-- backbone（embedding + attention + mHC + shared expert）→ 单独一个 IR
-- 每个 routed expert → 单独一个小 IR（或按 group 打包）
-- 在 toy 上验证拆分后数值一致性
+### 2.1 模型拆分：backbone + expert 分离 ✅
+- ✅ `scripts/split_to_expert_irs.py`: emits embed.xml + per-layer pre_moe/post_moe
+  + per-expert IR + final.xml (42 IRs total for the toy: 1 + 4*pre + 32 experts +
+  4*post + 1).
+- ✅ Backbone segments hold (gate + shared expert + HC + attention) — routed
+  experts are fully isolated.
+- ✅ Orchestrator validates numerical equivalence vs monolithic PT (greedy match;
+  abs diff in line with monolithic OV's drift from PT).
+- ✅ Found and fixed a pre-existing init bug: `nn.Parameter(torch.empty(...))` for
+  HC mix matrices and Gate.weight was uninitialized memory, causing non-deterministic
+  forward outputs across runs. Extended `_init_weights` to cover those.
 - **关键论文参考**：HOBBIT (arXiv:2411.01433)
 
-### 2.2 Expert offloading 基础版
-- backbone `compiled_model` 常驻内存
-- expert IR 存磁盘，按 router top-6 结果动态加载
-- LRU cache 管理已加载的 expert
-- 在 toy 上跑通完整推理流程
-- **目标**：先跑通，不追求速度
+### 2.2 Expert offloading 基础版 ✅
+- ✅ `scripts/run_with_expert_offload.py`: persistent backbone (embed + per-layer
+  pre/post + final), compile-on-miss + LRU-evict for routed experts.
+- ✅ Bit-exact match with the monolithic OV IR (abs_max = 0.0) — the split
+  layout doesn't introduce its own numerical drift.
+- ✅ With LRU size = 2 and 8 active experts per layer, the orchestrator triggers
+  30 evictions across 32 expert loads on the toy. Stats: hits/misses/evictions
+  per layer reported.
 
-### 2.3 真实权重分片转换
-- 改造 `load_real_v4_weights.py`：逐层 dequant → 逐 expert 写出 IR
-- 峰值内存控制在 ~30-40GB（一次只加载一个 expert 的权重）
-- **价值**：绕过 512GB 大机器的限制，64GB 上就能完成权重转换
+### 2.3 真实权重分片转换 ✅
+- ✅ `scripts/load_real_v4_weights.py --per-expert-ir`: new streaming mode that
+  loads + dequantizes ONE expert at a time, builds an Expert nn.Module, traces
+  with `ov.convert_model`, writes the IR, frees memory. Backbone collected into
+  a single BF16 safetensors at the end. Output layout matches 2.1's so 2.2's
+  orchestrator can drive either source without changes.
+- ✅ Peak RAM ~5-10 GB (backbone + one expert) — fits on this 64 GB host. The
+  old `--full-bf16` mode (~500 GB peak) is preserved for documentation; only
+  `--dry-run` runs on this host without real weights.
+- ✅ Dry-run still passes (69187 keys, 67569 mapped, 1618 skipped, 34167 paired
+  FP4/FP8 weights). Tests/test_dequant.py still passes.
 
 ## P1 — 性能优化
 
@@ -166,10 +181,10 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
 方向一（toy PoC）         方向二（推理引擎）
 ──────────────          ──────────────
 1.1 KV cache ✅          2.0 iGPU 兼容性 ✅
-1.2 MXFP4 验证 ✅        2.1 模型拆分（toy 上）← next
-      |                 2.2 Expert offloading（toy 上）
-      |                 2.3 真实权重分片转换
-1.3 upstream PR ← next   2.4 混合精度
+1.2 MXFP4 验证 ✅        2.1 模型拆分 ✅
+      |                 2.2 Expert offloading ✅
+      |                 2.3 真实权重分片转换 ✅
+1.3 upstream PR ← next   2.4 混合精度 ← next
       |                 2.5 Speculative prefetch
 1.4 云机器全量转换        2.6 NPU predictor
 ```
