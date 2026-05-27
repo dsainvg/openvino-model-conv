@@ -63,10 +63,10 @@ MoE：
 
 ### 0.1 下载模型
 ```bash
-# INT4 GPTQ 版本先行（~18GB），避免下载完整 BF16（~70GB）
-huggingface-cli download Qwen/Qwen3.6-35B-A3B-GPTQ-Int4 --local-dir ./qwen36-35b-int4
-# 或全量（如果带宽够）
+# 官方暂无 Qwen3.6 GPTQ-Int4，直接下载 BF16 全量（~70GB）
 huggingface-cli download Qwen/Qwen3.6-35B-A3B --local-dir ./qwen36-35b
+# 或用第三方 GPTQ-Int4（~18GB，palmfuture 社区量化版）
+huggingface-cli download palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4 --local-dir ./qwen36-35b-int4
 ```
 
 ### 0.2 标准路径试跑
@@ -221,7 +221,7 @@ deepseek-v4-openvino/
 | DeltaNet 无法被 OV 追踪 | Phase 1 手工重写，参考 V4 项目经验 |
 | optimum-intel 已原生支持 3.6 | Phase 0.2 就能发现，跳过 Phase 1，直接做 Phase 2 |
 | Expert 太小（dim=512），拆分开销 > 收益 | 改为按 group 打包（每组 16 个 expert 一个 IR） |
-| 内存不够跑 BF16 全量 | 直接用 INT4 GPTQ 版本，跳过 BF16 |
+| 内存不够跑 BF16 全量 | 用第三方 INT4 GPTQ (palmfuture/)，或本地 NNCF 量化 |
 
 ---
 
