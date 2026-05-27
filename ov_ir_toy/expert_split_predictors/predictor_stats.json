@@ -1,0 +1,20 @@
+{
+  "n_calibration_inputs": 8,
+  "n_eval_inputs": 4,
+  "seq_len": 128,
+  "topk_predict": 4,
+  "per_layer_recall_at_topk": {
+    "L1": 0.7705078125,
+    "L2": 0.81396484375,
+    "L3": 0.83251953125
+  },
+  "warm_hit_rate": 0.375,
+  "prefetch_waste_rate": 0.0,
+  "total_stats": {
+    "predicted_hits": 0,
+    "predicted_misses": 0,
+    "demand_loads": 80,
+    "prefetch_warm_hits": 48
+  },
+  "greedy_match": 4
+}

@@ -165,10 +165,22 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
   真实模型预期 hot:cold ≈ 10:1 频次比）。
 - **关键论文**：MxMoE (arXiv:2505.05799), MoPEQ (arXiv:2509.02512)
 
-### 2.5 Speculative Expert Prefetch
-- 用当前层的 hidden state / router logits 预测下一层的 top-k expert
-- 训练一个小型 predictor（几百 KB 参数）
-- OpenVINO `start_async` 重叠 prefetch I/O 和当前层计算
+### 2.5 Speculative Expert Prefetch ✅ 2026-05-27
+- ✅ `scripts/speculative_prefetch.py`: per-layer linear predictor
+  (`y2_flat → next layer gate logits`), trained with MSE against real
+  next-layer gate weights collected from calibration. Each predictor exports
+  to its own ~4 KB OV IR under `ov_ir_toy/expert_split_predictors/`.
+- ✅ Orchestrator runs predictor[i] at layer i and `ThreadPoolExecutor` kicks
+  off `core.compile_model()` for the predicted top-K experts of layer i+1
+  in the background while layer i's dispatch runs.
+- ✅ Bit-exact output vs no-prefetch baseline — prefetch only hides compile
+  latency; the dispatch still uses the REAL gate output, never the predicted
+  one.
+- ✅ Toy results: recall@2 = 0.77 / 0.81 / 0.83 for L1/L2/L3 predictors;
+  warm-hit rate 37.5%, prefetch waste 0% (with top-4 prediction over 8-expert
+  toy where every expert is active). predictor_stats.json saved for 2.6.
+- 对真实 V4-Flash 推算：top-6 of 256 比 top-2 of 8 选择性强很多，预期 recall
+  会下降但 waste 会上升；warm-hit 仍能显著减少 cold-start 延迟。
 - **关键论文**：DALI (arXiv:2602.03495), SP-MoE (arXiv:2510.10302)
 
 ### 2.6 NPU Expert Predictor
@@ -203,8 +215,8 @@ V4-Flash 有 256 个 routed expert，每个 token 只激活 top-6（~2.3%）。
       |                 2.2 Expert offloading ✅
       |                 2.3 真实权重分片转换 ✅
 1.3 upstream PR ← next   2.4 混合精度 ✅
-      |                 2.5 Speculative prefetch ← next
-1.4 云机器全量转换        2.6 NPU predictor
+      |                 2.5 Speculative prefetch ✅
+1.4 云机器全量转换        2.6 NPU predictor ← next
 ```
 
 两个方向在 toy 阶段可以共享代码（modeling、config、权重映射），
