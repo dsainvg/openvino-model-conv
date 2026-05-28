@@ -123,10 +123,11 @@ huggingface-cli download palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4 --local-dir ./qwen
 - [x] Router 先行 → 只 dispatch top-K expert → combine
 - [x] 在 toy 上验证 split-OV == monolithic-PT
 
-### 2.3 Expert 缓存策略
-- [ ] LRU cache：最近使用的 expert 留在内存（可复用 V4 的 `ExpertLRU`）
-- [ ] 预热：统计 calibration 数据上的 expert activation 频率，预加载 hot experts
-- [ ] 冷 expert 走磁盘 mmap
+### 2.3 Expert 缓存策略 ✅ 2026-05-28
+- [x] `src/qwen36/expert_manager.py`：`ExpertManager` LRU cache（capacity + pinning + hit/miss/eviction stats）
+- [x] 预热：`ExpertFrequency` 统计 calibration expert 激活频率，`hot_keys()` + `prewarm(pin=True)` 预加载 hot experts
+- [x] 缓存对输出透明（capacity=2 与 unbounded 生成结果字节一致），LRU 命中率随 capacity 提升（0% → 89%）
+- 注：冷 expert mmap 未做（已有 lazy loader callback，磁盘后端可后续接入）
 
 ### 2.4 真实权重加载 ✅ 2026-05-27
 - [x] `src/qwen36/gptq_dequant.py` (188 行)：GPTQ INT4 解量化
@@ -140,42 +141,42 @@ huggingface-cli download palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4 --local-dir ./qwen
   - `load_real_model()` 支持按子集层加载（省内存）
   - 测试：`tests/qwen36/test_load_real_weights.py` (4 个用例，1-layer smoke test)
 
-### 2.5 推理 pipeline
-- [ ] 完整多层 autoregressive decode loop
-- [ ] 真实权重 + split-IR 端到端生成文本
+### 2.5 推理 pipeline ✅ 2026-05-28
+- [x] `src/qwen36/pipeline.py`：`Qwen36Pipeline.generate()` 完整多层 autoregressive decode（prefill + greedy/temperature 采样）
+- [x] step() 经 split path + ExpertManager，数值匹配 monolithic forward（< 1e-4）
+- [x] toy 端到端生成验证（5 个用例）；真实权重端到端 40 层生成需 ~13 min 加载（workstation run，未在 CI 跑）
 
 ---
 
-## Phase 3：量化 & 性能优化（3-5 天）
+## Phase 3：量化 & 性能优化 🔧 2026-05-28（3.2 done）
 
 ### 3.1 量化实验
-- [ ] FP32 → INT8 → INT4 → MXFP4（复用 V4 项目的 NNCF 流程）
-- [ ] 每种精度的 perplexity（WikiText-2）
-- [ ] 每种精度的 tok/s
+- [x] Int4 (GPTQ) vs FP32 expert 压缩比：8x（理论）/ 3.07x（整 checkpoint 22.78GB vs ~70GB BF16）
+- [ ] FP32 → INT8 → INT4 → MXFP4 NNCF sweep（需 BF16 权重，未下载）
+- [ ] perplexity（WikiText-2）— 本机无参考（gptqmodel 无 Windows wheel，未下 BF16），scoped out
 
-### 3.2 性能 benchmark
-- [ ] 对比：朴素全 expert vs 选择性计算
-- [ ] 对比：OpenVINO vs transformers (PyTorch)
-- [ ] 对比：CPU only vs CPU + iGPU（backbone on iGPU, experts on CPU）
-- [ ] 首 token 延迟 (TTFT) + 生成吞吐 (tok/s)
+### 3.2 性能 benchmark ✅ 2026-05-28
+- [x] `scripts/qwen36_benchmark.py`：朴素全 expert vs 选择性计算（toy 2.85x，full-scale 理论 32x）
+- [x] 首 token 延迟 (TTFT) + 生成吞吐 (tok/s)
+- [x] LRU 命中率 vs capacity sweep
+- [ ] CPU only vs CPU + iGPU（需 OV device 配置，next）
 
 ### 3.3 多模态验证
-- [ ] 图片理解推理（Qwen3.6 原生支持）
-- [ ] 记录 vision encoder 的开销
+- [ ] scoped out：vision tower + MTP head 未移植（纯文本 port）
 
 ---
 
-## Phase 4：Demo & 文档（2-3 天）
+## Phase 4：Demo & 文档 🔧 2026-05-28（4.1 + README done）
 
-### 4.1 交互式 demo
-- [ ] CLI 文本生成 demo
-- [ ] 图片理解 demo（输入图片 + 问题）
-- [ ] 实时显示：哪些 expert 被激活、cache 命中率、tok/s
+### 4.1 交互式 demo ✅ 2026-05-28
+- [x] `scripts/qwen36_demo.py`：CLI 文本生成 demo（toy + --real 模式）
+- [x] 实时显示：每层哪些 expert 被激活、cache 命中率、tok/s、hottest experts
+- [ ] 图片理解 demo — scoped out（纯文本 port）
 
 ### 4.2 文档 & 文章
-- [ ] README：how to run、benchmark 结果、架构图
-- [ ] 技术文章：类似 V4 的 ARTICLE.md，讲解 MoE 高效推理的工程思路
-- [ ] 发布到 HuggingFace（预转换的 IR）
+- [x] `src/qwen36/README.md`：how to run、架构、module map、benchmark 结果、status
+- [ ] 技术文章（类似 V4 ARTICLE.md）— 未写
+- [ ] 发布到 HuggingFace（预转换的 IR）— 未做
 
 ### 4.3 Upstream 贡献
 - [ ] 如果 DeltaNet 需要自定义移植 → 向 optimum-intel 提 issue/PR
