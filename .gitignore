@@ -3,4 +3,6 @@ venv-qwen/
 __pycache__/
 hf_export_toy/
 hf_upload_toy_int4/
+ov_ir_qwen36_toy/
+.pytest_cache/
 *.log
