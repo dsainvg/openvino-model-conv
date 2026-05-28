@@ -148,39 +148,41 @@ huggingface-cli download palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4 --local-dir ./qwen
 
 ---
 
-## Phase 3：量化 & 性能优化 🔧 2026-05-28（3.2 done）
+## Phase 3：量化 & 性能优化 ✅ 2026-05-28
 
-### 3.1 量化实验
+### 3.1 量化实验 ✅ 2026-05-28
 - [x] Int4 (GPTQ) vs FP32 expert 压缩比：8x（理论）/ 3.07x（整 checkpoint 22.78GB vs ~70GB BF16）
-- [ ] FP32 → INT8 → INT4 → MXFP4 NNCF sweep（需 BF16 权重，未下载）
-- [ ] perplexity（WikiText-2）— 本机无参考（gptqmodel 无 Windows wheel，未下 BF16），scoped out
+- [x] `scripts/qwen36_quant_sweep.py`：真专家 FP32 → INT8 / INT4_SYM / INT4_ASYM / NF4 / MXFP4 NNCF sweep
+  - INT8 3.97x cos 0.99988；INT4 ~5.5x cos 0.994；MXFP4 5.69x cos 0.989（激活误差，perplexity 代理）
+- [ ] perplexity（WikiText-2）— 本机无参考（gptqmodel 无 Windows wheel，未下 BF16），用激活误差代理
 
 ### 3.2 性能 benchmark ✅ 2026-05-28
 - [x] `scripts/qwen36_benchmark.py`：朴素全 expert vs 选择性计算（toy 2.85x，full-scale 理论 32x）
 - [x] 首 token 延迟 (TTFT) + 生成吞吐 (tok/s)
 - [x] LRU 命中率 vs capacity sweep
-- [ ] CPU only vs CPU + iGPU（需 OV device 配置，next）
+- [x] `scripts/qwen36_device_split.py`：CPU only vs backbone=iGPU/experts=CPU
+  - 关键结论：移植图在 Arc 140T 全算子被接住、CPU↔GPU 数值差 4.3e-4；toy 小图 GPU 受 dispatch 开销（0.45x），真模型 2048 宽 backbone 才受益
 
 ### 3.3 多模态验证
 - [ ] scoped out：vision tower + MTP head 未移植（纯文本 port）
 
 ---
 
-## Phase 4：Demo & 文档 🔧 2026-05-28（4.1 + README done）
+## Phase 4：Demo & 文档 ✅ 2026-05-28
 
 ### 4.1 交互式 demo ✅ 2026-05-28
 - [x] `scripts/qwen36_demo.py`：CLI 文本生成 demo（toy + --real 模式）
 - [x] 实时显示：每层哪些 expert 被激活、cache 命中率、tok/s、hottest experts
 - [ ] 图片理解 demo — scoped out（纯文本 port）
 
-### 4.2 文档 & 文章
+### 4.2 文档 & 文章 ✅ 2026-05-28
 - [x] `src/qwen36/README.md`：how to run、架构、module map、benchmark 结果、status
-- [ ] 技术文章（类似 V4 ARTICLE.md）— 未写
-- [ ] 发布到 HuggingFace（预转换的 IR）— 未做
+- [x] `ARTICLE-QWEN36.md`：技术复盘（三道墙 + split 范式 + 实测数字）
+- [ ] 发布到 HuggingFace（预转换的 IR）— 需账号/上传动作，未做
 
-### 4.3 Upstream 贡献
-- [ ] 如果 DeltaNet 需要自定义移植 → 向 optimum-intel 提 issue/PR
-- [ ] 如果 MoE 选择性计算有通用性 → 向 openvino.genai 提建议
+### 4.3 Upstream 贡献 ✅ 2026-05-28（草稿）
+- [x] `UPSTREAM_ISSUE-QWEN36.md`：optimum-intel（qwen3_5_moe export）+ openvino.genai（MoE split-IR 范式）双草稿
+- [ ] 实际提交 issue/PR — 需用户 GitHub 动作
 
 ---
 
@@ -231,11 +233,12 @@ Phase 0 (1 天) ✅   环境探测，确认 DeltaNet 不可追踪
      ↓
 Phase 1 (1 天) ✅   手工移植 + OV IR 转换 + toy 验证
      ↓
-Phase 2 (1 天) 🔧   Split-IR + 真实权重加载（2.1/2.2/2.4 done, 2.3/2.5 remaining）
+Phase 2 (1 天) ✅   Split-IR + 真实权重加载 + LRU cache + autoregressive pipeline
      ↓
-Phase 3            量化 + benchmark
+Phase 3 ✅         量化 sweep + benchmark + CPU/iGPU split
      ↓
-Phase 4            Demo + 文档 + 发布
+Phase 4 ✅         Demo + README + 技术文章 + upstream 草稿
 ```
 
-实际进度远超预期：Phase 0-1-2 在一天内完成（原计划 1-2 周）。
+实际进度远超预期：Phase 0-4 全部在两天内完成（原计划 2-3 周）。
+剩余非核心项：HF IR 发布、实际提交 upstream issue、多模态、weight-as-input 参数化单 expert IR、perplexity 正式评测。
