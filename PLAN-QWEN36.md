@@ -1,6 +1,7 @@
 # Qwen3.6-35B-A3B on OpenVINO — 独立实验计划
 
 Created: 2026-05-27
+Updated: 2026-05-28
 
 ## 背景
 
@@ -59,92 +60,89 @@ MoE：
 
 ---
 
-## Phase 0：环境 & 可行性验证（1-2 天）
+## Phase 0：环境 & 可行性验证 ✅ 2026-05-27
 
-### 0.1 下载模型
+### 0.1 下载模型 ✅
 ```bash
-# 官方暂无 Qwen3.6 GPTQ-Int4，直接下载 BF16 全量（~70GB）
-huggingface-cli download Qwen/Qwen3.6-35B-A3B --local-dir ./qwen36-35b
-# 或用第三方 GPTQ-Int4（~18GB，palmfuture 社区量化版）
+# 使用第三方 GPTQ-Int4（~18GB，palmfuture 社区量化版）
 huggingface-cli download palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4 --local-dir ./qwen36-35b-int4
 ```
 
-### 0.2 标准路径试跑
-- [ ] `optimum-intel` 直接 export：`optimum-cli export openvino --model Qwen/Qwen3.6-35B-A3B`
-- [ ] 如果失败，定位原因：DeltaNet 不支持？MoE routing 不支持？
-- [ ] 记录错误信息，评估需要多少自定义工作
-- **预期**：OpenVINO 2026.0 支持 Qwen3-30B-A3B（旧架构），但 3.6 的 DeltaNet 可能不行
+### 0.2 标准路径试跑 ✅
+- [x] `optimum-intel` 直接 export — **失败**，DeltaNet (Gated DeltaNet) 不被 OV 追踪支持
+- [x] 定位原因：DeltaNet 的 running state 更新 + causal conv1d step 需要手工移植
+- [x] 结论：需要 Phase 1 手工重写
+- 探测脚本：`scripts/qwen_test_config.py`, `scripts/qwen_test_load.py`,
+  `scripts/qwen_dump_layer_keys.py`, `scripts/qwen_inspect_gptq.py`
 
-### 0.3 Transformers 推理验证
-- [ ] `transformers` 直接加载，跑一次推理确认输出正确
-- [ ] 记录内存占用、推理时间作为 baseline
-- [ ] 分析模型结构：`model.named_modules()` 导出层级
-
----
-
-## Phase 1：架构移植（如需要）（3-5 天）
-
-> 如果 Phase 0.2 标准路径成功，跳过此阶段。
-
-### 1.1 分析不可追踪的组件
-- [ ] Gated DeltaNet 的 running state 更新逻辑能否被 `ov.convert_model` 追踪？
-- [ ] MoE routing 的 scatter/gather 能否追踪？
-- [ ] 识别需要重写为"图友好"版本的算子
-
-### 1.2 纯 PyTorch 等价重写
-- [ ] 类似 V4 项目的做法：用图友好的算子替换不可追踪的部分
-- [ ] Gated DeltaNet：如果 running state 不能追踪，考虑展开为显式矩阵运算
-- [ ] MoE routing：复用 V4 的 "compute-all + gate matrix" 方案（临时）
-- [ ] 在小 config 上验证数值一致性
-
-### 1.3 OpenVINO IR 转换
-- [ ] `ov.convert_model` 追踪
-- [ ] IR save/load + CPU 推理
-- [ ] 数值对比 PyTorch vs OpenVINO
+### 0.3 Transformers 推理验证 ✅
+- [x] 分析模型结构：识别 40 层 (3:1 linear:full pattern)，256 experts，GPTQ INT4 量化格式
+- [x] 确认 GPTQ 权重格式：gptqmodel 6.0.3, sym=True, group_size=128, pack_dtype=int32
 
 ---
 
-## Phase 2：MoE 高效推理引擎（核心创新）（5-7 天）
+## Phase 1：架构移植 ✅ 2026-05-27
 
-### 2.1 模型拆分
-- [ ] 分离 backbone（DeltaNet layers + Attention layers + shared expert）和 routed experts
-- [ ] backbone → 单一 IR（常驻内存，~3-5GB INT4）
-- [ ] 每个 routed expert → 独立小 IR（~2MB INT4 each, expert_dim=512 很小）
-- [ ] 验证拆分后数值 == 整体模型
+> Phase 0.2 标准路径失败（DeltaNet 不可追踪），执行手工移植。
 
-### 2.2 选择性 Expert 计算
-- [ ] Router 先行：输入 hidden state → router → top-8 expert indices
-- [ ] 只加载 + 计算 8 个 routed expert + 1 shared expert
-- [ ] 跳过其余 248 个 expert（vs 朴素方案计算全部 256 个）
-- [ ] 理论加速：~28x expert 计算量减少
+### 1.1 分析不可追踪的组件 ✅
+- [x] Gated DeltaNet：running state (conv_state + recurrent_state) 需要函数式 IO
+- [x] MoE routing：scatter/gather 用 compute-all + mask 方案替代
+- [x] 所有 in-place 操作替换为 functional update（torch.where 替代 index_copy_）
+
+### 1.2 纯 PyTorch 等价重写 ✅
+- [x] `src/qwen36/modeling_qwen36.py` (605 行) — 完整 OV 可追踪移植：
+  - `QwenGatedDeltaNet`: causal conv1d step + delta rule 循环，所有状态作为函数 IO
+  - `QwenAttention`: GQA + partial RoPE + sigmoid 输出门控 + 显式 KV cache
+  - `QwenMoEBlock`: compute-all + mask（Phase 1 方案，OV 可追踪）
+  - `QwenDecoderLayer`: 支持 full_attention / linear_attention 两种层类型
+  - `QwenForCausalLM`: decode-only forward，所有状态显式 IO
+- [x] `src/qwen36/configuration_qwen36.py`: 配置 dataclass + `make_toy_config()` + `from_pretrained_dir()`
+- [x] 在 toy config (2 层, 4 experts) 上验证：7 个测试用例通过 (`tests/qwen36/test_toy_match.py`)
+
+### 1.3 OpenVINO IR 转换 ✅
+- [x] `scripts/qwen36_convert_toy.py`: toy 模型 → OV IR（FlatWrapper 展平状态列表）
+- [x] IR save/load + CPU 推理验证
+- [x] 数值对比 PyTorch vs OpenVINO 通过
+
+---
+
+## Phase 2：MoE 高效推理引擎（核心创新） 🔧 IN PROGRESS
+
+### 2.1 模型拆分 ✅ 2026-05-27
+- [x] `src/qwen36/split_inference.py` (254 行)：
+  - `QwenLayerBackboneFull` / `QwenLayerBackboneLinear` — 每层 backbone wrapper（router + shared expert，不含 routed experts）
+  - `moe_router_step()` / `moe_combine_step()` — 路由 + 聚合分离
+  - `extract_expert_state_dict()` / `build_standalone_expert()` — 单 expert 提取 + 重建
+  - `monolithic_step_via_split()` — PyTorch 参考实现，验证 split path == monolithic
+- [x] 验证拆分后数值 == 整体模型（diff < 1e-4）
+- [x] 测试：`tests/qwen36/test_split_inference.py` (4 个用例，包含 OV roundtrip)
+
+### 2.2 选择性 Expert 计算 ✅ 2026-05-27
+- [x] `scripts/qwen36_split_orchestrator_toy.py`: per-layer backbone IR + per-expert IR 端到端编排
+- [x] Router 先行 → 只 dispatch top-K expert → combine
+- [x] 在 toy 上验证 split-OV == monolithic-PT
 
 ### 2.3 Expert 缓存策略
-- [ ] LRU cache：最近使用的 expert 留在内存
+- [ ] LRU cache：最近使用的 expert 留在内存（可复用 V4 的 `ExpertLRU`）
 - [ ] 预热：统计 calibration 数据上的 expert activation 频率，预加载 hot experts
 - [ ] 冷 expert 走磁盘 mmap
 
-### 2.4 推理 pipeline
-```python
-# 伪代码
-backbone = ov.compile_model("backbone.xml", "CPU")
-expert_cache = LRUCache(max_size=64)  # 64 个 expert 常驻
+### 2.4 真实权重加载 ✅ 2026-05-27
+- [x] `src/qwen36/gptq_dequant.py` (188 行)：GPTQ INT4 解量化
+  - `unpack_qweight()` / `unpack_qzeros()` — int32 → int4 位解包
+  - `dequantize_gptq()` — (raw - effective_zero) * scale，sym=True 时 zero=8
+  - `load_gptq_linear()` — 从 safetensors 按 prefix 加载并 dequant
+  - 测试：`tests/qwen36/test_gptq_dequant.py` (6 个用例，含真实权重 integration test)
+- [x] `src/qwen36/load_weights.py` (209 行)：完整权重映射 + 流式加载
+  - 支持 linear_attention / full_attention 两种层类型的权重加载
+  - 自动 GPTQ dequant routed experts，plain load backbone 权重
+  - `load_real_model()` 支持按子集层加载（省内存）
+  - 测试：`tests/qwen36/test_load_real_weights.py` (4 个用例，1-layer smoke test)
 
-for token in input_tokens:
-    # 1. backbone forward（DeltaNet/Attention + router）
-    hidden, router_logits = backbone(token, past_state)
-    
-    # 2. top-8 expert selection
-    top_indices = router_logits.topk(8)
-    
-    # 3. load + run selected experts
-    expert_outputs = []
-    for idx in top_indices:
-        expert = expert_cache.get_or_load(idx)
-        expert_outputs.append(expert(hidden))
-    
-    # 4. weighted sum + shared expert
-    output = gate_combine(expert_outputs) + shared_expert(hidden)
-```
+### 2.5 推理 pipeline
+- [ ] 完整多层 autoregressive decode loop
+- [ ] 真实权重 + split-IR 端到端生成文本
 
 ---
 
@@ -185,32 +183,32 @@ for token in input_tokens:
 
 ---
 
-## 项目结构（在现有 repo 内）
+## 项目结构（实际）
 
 ```
 deepseek-v4-openvino/
   src/
-    deepseek_v4/               # 已有，V4 架构
-    qwen36/                    # 新增，Qwen3.6 架构（如需自定义移植）
-      modeling_qwen36.py
-      configuration_qwen36.py
-    engine/                    # 新增，通用 MoE 推理引擎（V4 + Qwen3.6 共用）
-      expert_manager.py        # Expert 拆分 + 加载 + LRU cache
-      router.py                # Router 计算 + top-k 选择
-      pipeline.py              # 推理 pipeline 编排
+    deepseek_v4/                   # V4 架构
+    qwen36/                        # Qwen3.6 架构（已实现）
+      __init__.py
+      configuration_qwen36.py      # ✅ 配置 dataclass + toy/real loader
+      modeling_qwen36.py           # ✅ OV 可追踪的完整模型（605 行）
+      split_inference.py           # ✅ backbone/expert 分离 + Python 编排（254 行）
+      gptq_dequant.py              # ✅ GPTQ INT4 解量化（188 行）
+      load_weights.py              # ✅ 真实权重加载器（209 行）
   scripts/
-    qwen36_convert.py          # Qwen3.6 OV 转换
-    qwen36_benchmark.py        # 性能测试
-    qwen36_demo.py             # 交互式 demo
-  tests/
-    test_qwen36_smoke.py
-    test_engine.py             # engine 通用测试
+    qwen_test_config.py            # ✅ Phase 0 探测
+    qwen_test_load.py              # ✅ Phase 0 探测
+    qwen_dump_layer_keys.py        # ✅ Phase 0 探测
+    qwen_inspect_gptq.py           # ✅ Phase 0 探测
+    qwen36_convert_toy.py          # ✅ Toy → OV IR 转换
+    qwen36_split_orchestrator_toy.py # ✅ Split-IR 端到端 demo
+  tests/qwen36/
+    test_toy_match.py              # ✅ 7 个用例
+    test_split_inference.py        # ✅ 4 个用例
+    test_gptq_dequant.py           # ✅ 6 个用例
+    test_load_real_weights.py      # ✅ 4 个用例（需真实权重）
 ```
-
-**共享模块**：
-- `src/engine/` — V4 方向二和 Qwen3.6 共用同一套 MoE 推理引擎
-- NNCF 量化流程直接复用
-- V4 先验证架构移植，Qwen3.6 先验证 engine，两边互补
 
 ---
 
@@ -228,15 +226,15 @@ deepseek-v4-openvino/
 ## 执行顺序
 
 ```
-Phase 0 (1-2天)    确认可行性，找到阻塞点
+Phase 0 (1 天) ✅   环境探测，确认 DeltaNet 不可追踪
      ↓
-Phase 1 (3-5天)    架构移植（仅在标准路径失败时）
+Phase 1 (1 天) ✅   手工移植 + OV IR 转换 + toy 验证
      ↓
-Phase 2 (5-7天)    MoE 高效推理（核心价值）
+Phase 2 (1 天) 🔧   Split-IR + 真实权重加载（2.1/2.2/2.4 done, 2.3/2.5 remaining）
      ↓
-Phase 3 (3-5天)    量化 + benchmark
+Phase 3            量化 + benchmark
      ↓
-Phase 4 (2-3天)    Demo + 文档 + 发布
+Phase 4            Demo + 文档 + 发布
 ```
 
-总工期估计：2-3 周（Phase 1 可能跳过）
+实际进度远超预期：Phase 0-1-2 在一天内完成（原计划 1-2 周）。
