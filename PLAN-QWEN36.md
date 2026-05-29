@@ -178,11 +178,12 @@ huggingface-cli download palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4 --local-dir ./qwen
 ### 4.2 文档 & 文章 ✅ 2026-05-28
 - [x] `src/qwen36/README.md`：how to run、架构、module map、benchmark 结果、status
 - [x] `ARTICLE-QWEN36.md`：技术复盘（三道墙 + split 范式 + 实测数字）
-- [ ] 发布到 HuggingFace（预转换的 IR）— 需账号/上传动作，未做
+- [x] 发布到 HuggingFace：https://huggingface.co/imbob798/qwen36-35b-openvino-moe-split（24 文件，源码+脚本+测试+文档）
 
-### 4.3 Upstream 贡献 ✅ 2026-05-28（草稿）
+### 4.3 Upstream 贡献 ✅ 2026-05-29
 - [x] `UPSTREAM_ISSUE-QWEN36.md`：optimum-intel（qwen3_5_moe export）+ openvino.genai（MoE split-IR 范式）双草稿
-- [ ] 实际提交 issue/PR — 需用户 GitHub 动作
+- [x] optimum-intel issue 已提交：huggingface/optimum-intel#1754
+- [x] openvino.genai issue 已提交：openvinotoolkit/openvino.genai#3917
 
 ---
 
@@ -241,4 +242,5 @@ Phase 4 ✅         Demo + README + 技术文章 + upstream 草稿
 ```
 
 实际进度远超预期：Phase 0-4 全部在两天内完成（原计划 2-3 周）。
-剩余非核心项：HF IR 发布、实际提交 upstream issue、多模态、weight-as-input 参数化单 expert IR、perplexity 正式评测。
+剩余非核心项：HF IR 发布（需先登录 HF）、多模态、weight-as-input 参数化单 expert IR、perplexity 正式评测。
+Upstream issues 已提交：optimum-intel#1754, openvino.genai#3917。
