@@ -1,11 +1,13 @@
-# dpv4-openvino
+# openvino-model-lab
 
-将 **DeepSeek-V4 (V4-Flash)** 架构移植到 **OpenVINO** 的概念验证 (PoC)。
-使用纯 PyTorch 端到端地构建一个随机初始化的小尺寸 toy 模型,通过
-`openvino.convert_model` 完成图追踪,导出为 IR,然后重新加载并在 CPU 上推理。
-同一套 Python 模块在显存/内存足够的环境下可以直接加载真正的 V4-Flash 权重。
+将大模型架构移植到 **OpenVINO** 的实验项目，在 64GB Intel AI PC 上验证。
 
-[English README](README.md) — [Hugging Face: `imbob798/deepseek-v4-toy-int4-ov`](https://huggingface.co/imbob798/deepseek-v4-toy-int4-ov)
+| 模型 | 总参数 | 激活参数 | 状态 | 目录 |
+|------|--------|---------|------|------|
+| **DeepSeek-V4-Flash** | 284B | 13B | Toy IR + 真实权重加载器 | [`deepseek-v4/`](deepseek-v4/) |
+| **Qwen3.6-35B-A3B** | 35B | 3B | 完整 pipeline + benchmark | [`qwen36/`](qwen36/) |
+
+[English README](README.md) — HF: [`imbob798/deepseek-v4-toy-int4-ov`](https://huggingface.co/imbob798/deepseek-v4-toy-int4-ov) · [`imbob798/qwen36-35b-openvino-moe-split`](https://huggingface.co/imbob798/qwen36-35b-openvino-moe-split)
 
 ## 当前状态
 
@@ -27,7 +29,7 @@
 
 ## 移植覆盖了哪些 V4 特性
 
-参考实现位于 `v4_flash_meta/inference/model.py`(从
+参考实现位于 `vendor/v4_flash_meta/inference/model.py`(从
 [`deepseek-ai/DeepSeek-V4-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
 下载),依赖 TileLang JIT 内核以及 OpenVINO 无法直接追踪的 FP4/FP8 微缩放数据类型。
 本次移植将这些替换成纯 PyTorch 等价实现,同时保持架构形状完全一致:
@@ -54,22 +56,23 @@
 ## 仓库结构
 
 ```
-src/deepseek_v4/
-  configuration_deepseek_v4.py   # 包含全部 V4 字段的 PretrainedConfig
-  modeling_deepseek_v4.py        # ~720 行,inference/model.py 的纯 PyTorch 移植
-  __init__.py
-tests/
-  test_modeling_smoke.py         # toy 配置 + PyTorch 前向冒烟测试
-  test_ov_dynamic_shapes.py      # 在与追踪 shape 不同的输入上运行 IR
-  test_dequant.py                # FP4/FP8 反量化与名字映射的单元测试
-scripts/
-  convert_to_openvino.py         # PyTorch -> ov.convert_model -> 保存 IR -> CPU 运行 + 对比
-  quantize_with_nncf.py          # 用 nncf.compress_weights 把 FP32 IR 压到 INT8 / INT4
-  export_to_optimum_intel.py     # 保存 HF 目录并打包 IR -> OVModelForCausalLM.from_pretrained
-  load_real_v4_weights.py        # 真实 V4 -> 我们的命名:FP4/FP8 反量化 + 名字映射 (--dry-run)
-  fetch_v4_meta.py               # 下载 HF V4-Flash 仓库的元数据
-  probe_v4_repos.py              # 快速探测 HF 仓库的小工具
-v4_flash_meta/                   # 镜像的 HF 元数据 + 参考实现 (deepseek MIT 许可)
+deepseek-v4/
+  src/
+    configuration.py             # 包含全部 V4 字段的 PretrainedConfig
+    modeling.py                  # ~720 行,inference/model.py 的纯 PyTorch 移植
+    __init__.py
+  tests/
+    test_modeling_smoke.py       # toy 配置 + PyTorch 前向冒烟测试
+    test_ov_dynamic_shapes.py    # 在与追踪 shape 不同的输入上运行 IR
+    test_dequant.py              # FP4/FP8 反量化与名字映射的单元测试
+  scripts/
+    convert_to_openvino.py       # PyTorch -> ov.convert_model -> 保存 IR -> CPU 运行 + 对比
+    quantize_with_nncf.py        # 用 nncf.compress_weights 把 FP32 IR 压到 INT8 / INT4
+    export_to_optimum_intel.py   # 保存 HF 目录并打包 IR -> OVModelForCausalLM.from_pretrained
+    load_real_v4_weights.py      # 真实 V4 -> 我们的命名:FP4/FP8 反量化 + 名字映射 (--dry-run)
+    fetch_v4_meta.py             # 下载 HF V4-Flash 仓库的元数据
+    probe_v4_repos.py            # 快速探测 HF 仓库的小工具
+vendor/v4_flash_meta/            # 镜像的 HF 元数据 + 参考实现 (deepseek MIT 许可)
 ov_ir_toy/
   deepseek_v4_toy.xml/.bin       # 为 toy 模型生成的 OpenVINO IR
 ```
@@ -139,7 +142,7 @@ IR 会被写到 `ov_ir_toy/deepseek_v4_toy.xml`(以及对应的 `.bin`)。
 FP4 专家权重(e2m1fn,32 列一份的 E8M0 微缩放)与 FP8 主干权重(e4m3fn,
 128×128 块缩放)反量化为 BF16。
 
-- 反量化逻辑由 `tests/test_dequant.py` 用合成张量做单元测试覆盖。
+- 反量化逻辑由 `deepseek-v4/tests/test_dequant.py` 用合成张量做单元测试覆盖。
 - `--dry-run` 仅读取 index 文件、检查命名覆盖。在真实 V4-Flash 的 index 上当前给出:
   67,569 个 key 映射到我们的参数,1,618 个落在显式跳过名单(MTP 块、hash routing
   表、路由门偏置),0 个未映射。
@@ -159,7 +162,7 @@ FP4 专家权重(e2m1fn,32 列一份的 E8M0 微缩放)与 FP8 主干权重(e4m3
 
 ## 致谢
 
-`v4_flash_meta/` 镜像了
+`vendor/v4_flash_meta/` 镜像了
 [`deepseek-ai/DeepSeek-V4-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
-中的文件,该仓库以 MIT 许可证发布(见 `v4_flash_meta/LICENSE`)。
-`src/deepseek_v4/` 中的 PyTorch 移植代码为本仓库原创,遵循参考架构。
+中的文件,该仓库以 MIT 许可证发布(见 `vendor/v4_flash_meta/LICENSE`)。
+`deepseek-v4/src/` 中的 PyTorch 移植代码为本仓库原创,遵循参考架构。

@@ -1,11 +1,13 @@
-# dpv4-openvino
+# openvino-model-lab
 
-Proof-of-concept port of the **DeepSeek-V4 (V4-Flash)** architecture to **OpenVINO**.
-A toy-sized model with random weights is built end-to-end in pure PyTorch, traced through
-`openvino.convert_model`, saved as IR, then reloaded and run on CPU. The same Python
-modules accept the real V4-Flash weights wherever there is enough RAM/VRAM to host them.
+Proof-of-concept ports of large model architectures to **OpenVINO**, tested on a 64 GB Intel AI PC.
 
-[中文 README](README.zh-CN.md) — [Hugging Face: `imbob798/deepseek-v4-toy-int4-ov`](https://huggingface.co/imbob798/deepseek-v4-toy-int4-ov)
+| Model | Params | Active | Status | Folder |
+|-------|--------|--------|--------|--------|
+| **DeepSeek-V4-Flash** | 284B | 13B | Toy IR + real weight loader | [`deepseek-v4/`](deepseek-v4/) |
+| **Qwen3.6-35B-A3B** | 35B | 3B | Full pipeline + benchmark | [`qwen36/`](qwen36/) |
+
+[中文 README](README.zh-CN.md) — HF: [`imbob798/deepseek-v4-toy-int4-ov`](https://huggingface.co/imbob798/deepseek-v4-toy-int4-ov) · [`imbob798/qwen36-35b-openvino-moe-split`](https://huggingface.co/imbob798/qwen36-35b-openvino-moe-split)
 
 ## Status
 
@@ -27,7 +29,7 @@ bar is met, plus a numerical sanity check vs. PyTorch.
 
 ## What V4 features the port covers
 
-The reference implementation at `v4_flash_meta/inference/model.py` (downloaded from
+The reference implementation at `vendor/v4_flash_meta/inference/model.py` (downloaded from
 [`deepseek-ai/DeepSeek-V4-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash))
 relies on TileLang JIT kernels and FP4/FP8 microscaled dtypes that OpenVINO cannot
 trace directly. This port replaces those with pure-PyTorch equivalents while keeping
@@ -57,22 +59,23 @@ prediction blocks, hash-routed first 3 layers (configurable to 0 for the toy).
 ## Repo layout
 
 ```
-src/deepseek_v4/
-  configuration_deepseek_v4.py   # PretrainedConfig with all V4 fields
-  modeling_deepseek_v4.py        # ~720-line pure-PyTorch port of inference/model.py
-  __init__.py
-tests/
-  test_modeling_smoke.py         # toy config + PyTorch forward smoke test
-  test_ov_dynamic_shapes.py      # IR runs on shapes other than the trace shape
-  test_dequant.py                # FP4/FP8 dequant + name-mapping unit tests
-scripts/
-  convert_to_openvino.py         # PyTorch -> ov.convert_model -> save IR -> CPU run + compare
-  quantize_with_nncf.py          # FP32 IR -> INT8 / INT4 via nncf.compress_weights
-  export_to_optimum_intel.py     # save HF dir + bundle IR -> OVModelForCausalLM.from_pretrained
-  load_real_v4_weights.py        # real-V4 -> ours: FP4/FP8 dequant + name mapping (--dry-run)
-  fetch_v4_meta.py               # downloads the HF V4-Flash repo metadata
-  probe_v4_repos.py              # quick HF probe utility
-v4_flash_meta/                   # mirrored HF metadata + reference impl (deepseek MIT)
+deepseek-v4/
+  src/
+    configuration.py             # PretrainedConfig with all V4 fields
+    modeling.py                  # ~720-line pure-PyTorch port of inference/model.py
+    __init__.py
+  tests/
+    test_modeling_smoke.py       # toy config + PyTorch forward smoke test
+    test_ov_dynamic_shapes.py    # IR runs on shapes other than the trace shape
+    test_dequant.py              # FP4/FP8 dequant + name-mapping unit tests
+  scripts/
+    convert_to_openvino.py       # PyTorch -> ov.convert_model -> save IR -> CPU run + compare
+    quantize_with_nncf.py        # FP32 IR -> INT8 / INT4 via nncf.compress_weights
+    export_to_optimum_intel.py   # save HF dir + bundle IR -> OVModelForCausalLM.from_pretrained
+    load_real_v4_weights.py      # real-V4 -> ours: FP4/FP8 dequant + name mapping (--dry-run)
+    fetch_v4_meta.py             # downloads the HF V4-Flash repo metadata
+    probe_v4_repos.py            # quick HF probe utility
+vendor/v4_flash_meta/            # mirrored HF metadata + reference impl (deepseek MIT)
 ov_ir_toy/
   deepseek_v4_toy.xml/.bin       # generated OpenVINO IR for the toy model
 ```
@@ -143,7 +146,7 @@ FP4 expert weights and FP8 main weights to BF16 shard-by-shard.
 
 - Dequant logic (FP4 e2m1fn with 32-col E8M0 microscale, FP8 e4m3fn with
   128×128 block scale) is unit-tested with synthetic tensors in
-  `tests/test_dequant.py`.
+  `deepseek-v4/tests/test_dequant.py`.
 - `--dry-run` reads only the index and verifies coverage. On the real
   V4-Flash index this currently reports: 67,569 keys mapped to our params,
   1,618 on the explicit skip list (MTP blocks + hash-routing tables + routed-gate
@@ -167,7 +170,7 @@ FP4 expert weights and FP8 main weights to BF16 shard-by-shard.
 
 ## Attribution
 
-`v4_flash_meta/` mirrors files from
+`vendor/v4_flash_meta/` mirrors files from
 [`deepseek-ai/DeepSeek-V4-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash),
-licensed MIT (see `v4_flash_meta/LICENSE`). The PyTorch port in `src/deepseek_v4/` is
+licensed MIT (see `vendor/v4_flash_meta/LICENSE`). The PyTorch port in `deepseek-v4/src/` is
 original code that follows the reference architecture.
