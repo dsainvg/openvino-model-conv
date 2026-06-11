@@ -92,10 +92,48 @@ def _save_int4(ov_model: ov.Model, xml_path: str) -> None:
 
 def copy_non_weights_files(src_dir: Path, dst_dir: Path) -> None:
     import shutil
-    ignore_suffixes = {".safetensors", ".bin", ".pt", ".ckpt", ".h5", ".msgpack", ".ot"}
+    ignore_suffixes = {".safetensors", ".bin", ".pt", ".ckpt", ".h5", ".msgpack", ".ot", ".xml"}
     for item in src_dir.iterdir():
         if item.is_file() and item.suffix.lower() not in ignore_suffixes:
             shutil.copy2(item, dst_dir / item.name)
+
+
+def export_tokenizer(model_dir: Path, output_dir: Path) -> None:
+    """Convert HF tokenizer → openvino_tokenizer.xml/bin."""
+    try:
+        from openvino_tokenizers import convert_tokenizer
+        from transformers import AutoTokenizer
+    except ImportError as e:
+        print(f"  ⚠ Cannot export OV tokenizer: {e}")
+        return
+
+    print("  Converting to OV tokenizer...")
+    hf_tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+    ov_tok, ov_detok = convert_tokenizer(hf_tok, with_detokenizer=True)
+
+    ov.save_model(ov_tok,   str(output_dir / "openvino_tokenizer.xml"))
+    ov.save_model(ov_detok, str(output_dir / "openvino_detokenizer.xml"))
+    print("  openvino_tokenizer.xml ✓")
+    print("  openvino_detokenizer.xml ✓")
+
+
+def write_generation_config(cfg: Qwen35Config, output_dir: Path) -> None:
+    """Write generation_config.json required by openvino_genai."""
+    gen_cfg = {
+        "bos_token_id": cfg.bos_token_id,
+        "eos_token_id": cfg.eos_token_id,
+        "pad_token_id": cfg.pad_token_id,
+        "max_new_tokens": 512,
+        "do_sample": False,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 50,
+        "repetition_penalty": 1.0,
+        "transformers_version": "4.57.0.dev0",
+    }
+    with open(output_dir / "generation_config.json", "w", encoding="utf-8") as f:
+        json.dump(gen_cfg, f, indent=2)
+    print("  generation_config.json ✓")
 
 
 def parse_args() -> argparse.Namespace:
@@ -172,10 +210,10 @@ def main() -> int:
 
     ov_embed = ov.convert_model(embed_wrapper, example_input=(example_ids,))
     # Embedding is always FP16 — INT4 on a lookup table saves nothing
-    ov.save_model(ov_embed, str(output_dir / "embed.xml"), compress_to_fp16=True)
+    ov.save_model(ov_embed, str(output_dir / "embed_tokens.xml"), compress_to_fp16=True)
     del shell, embed_wrapper, ov_embed
     gc.collect()
-    print("  embed.xml ✓ (fp16)")
+    print("  embed_tokens.xml ✓ (fp16)")
 
     # ──────────────────────────────────────────────────────────────
     # 2. Decoder Layers  (INT4 — the big savings are here)
@@ -266,6 +304,8 @@ def main() -> int:
 
     # Copy tokenizer / config alongside the IR
     copy_non_weights_files(model_dir, output_dir)
+    export_tokenizer(model_dir, output_dir)
+    write_generation_config(cfg, output_dir)
 
     # Summary
     xmls = sorted(output_dir.glob("*.xml"))
