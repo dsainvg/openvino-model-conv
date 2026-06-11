@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import torch
 
 from .expert_manager import ExpertFrequency, ExpertManager
-from .modeling_qwen36 import QwenForCausalLM
+from .modeling import QwenForCausalLM
 from .split_inference import combine_layer_output, moe_router_step
 
 
