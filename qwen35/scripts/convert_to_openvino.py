@@ -302,42 +302,44 @@ def main() -> int:
     copy_non_weights_files(model_dir, output_dir)
 
     if args.compile_check:
-        def print_direct(*args, **kwargs):
-            import sys
-            print(*args, **kwargs, file=sys.__stdout__)
-            sys.__stdout__.flush()
+        debug_log_path = REPO / "debug_compile.txt"
+        with open(debug_log_path, "w", encoding="utf-8") as f_debug:
+            def log_debug(msg):
+                print(msg)
+                f_debug.write(msg + "\n")
+                f_debug.flush()
 
-        print_direct("\nCompile-check: reloading IR on CPU ...")
-        core     = ov.Core()
-        print_direct(f"  available devices: {core.available_devices}")
-        compiled = core.compile_model(str(ir_xml), "CPU")
-        print_direct(f"  compiled — {len(compiled.inputs)} inputs / {len(compiled.outputs)} outputs")
+            log_debug("\nCompile-check: reloading IR on CPU ...")
+            core     = ov.Core()
+            log_debug(f"  available devices: {core.available_devices}")
+            compiled = core.compile_model(str(ir_xml), "CPU")
+            log_debug(f"  compiled — {len(compiled.inputs)} inputs / {len(compiled.outputs)} outputs")
 
-        # Build inputs dict by matching string names to prevent crashes due to port reordering
-        ov_inputs = {}
-        print_direct("\n--- Compile-check Debug Info ---")
-        print_direct(f"Expected input names order: {input_names}")
-        print_direct("Compiled model inputs:")
-        for idx, inp in enumerate(compiled.inputs):
-            print_direct(f"  Compiled Input {idx}: names={inp.get_names()}, any_name={inp.get_any_name()}, shape={inp.get_partial_shape()}, type={inp.get_element_type()}")
-        
-        for inp in compiled.inputs:
-            name = inp.get_any_name()
-            if name in input_names:
-                idx = input_names.index(name)
-                val = example_inputs[idx].numpy()
-                ov_inputs[inp] = val
-                print_direct(f"  Mapped {name} -> array shape={val.shape}, dtype={val.dtype}")
-            else:
-                raise ValueError(f"Compiled model has unexpected input: {name}")
+            # Build inputs dict by matching string names to prevent crashes due to port reordering
+            ov_inputs = {}
+            log_debug("\n--- Compile-check Debug Info ---")
+            log_debug(f"Expected input names order: {input_names}")
+            log_debug("Compiled model inputs:")
+            for idx, inp in enumerate(compiled.inputs):
+                log_debug(f"  Compiled Input {idx}: names={inp.get_names()}, any_name={inp.get_any_name()}, shape={inp.get_partial_shape()}, type={inp.get_element_type()}")
+            
+            for inp in compiled.inputs:
+                name = inp.get_any_name()
+                if name in input_names:
+                    idx = input_names.index(name)
+                    val = example_inputs[idx].numpy()
+                    ov_inputs[inp] = val
+                    log_debug(f"  Mapped {name} -> array shape={val.shape}, dtype={val.dtype}")
+                else:
+                    raise ValueError(f"Compiled model has unexpected input: {name}")
 
-        print_direct("Compiled model outputs:")
-        for idx, out in enumerate(compiled.outputs):
-            print_direct(f"  Compiled Output {idx}: names={out.get_names()}, shape={out.get_partial_shape()}, type={out.get_element_type()}")
+            log_debug("Compiled model outputs:")
+            for idx, out in enumerate(compiled.outputs):
+                log_debug(f"  Compiled Output {idx}: names={out.get_names()}, shape={out.get_partial_shape()}, type={out.get_element_type()}")
 
-        print_direct("Invoking compiled model...")
-        ov_result = compiled(ov_inputs)
-        print_direct("Invocation successful!")
+            log_debug("Invoking compiled model...")
+            ov_result = compiled(ov_inputs)
+            log_debug("Invocation successful!")
 
         # Retrieve logits safely by name
         logits_output = None
