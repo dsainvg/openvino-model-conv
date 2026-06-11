@@ -231,7 +231,10 @@ def _make_stateful(
 
     where N = num_full, M = num_linear.
     """
-    from openvino.runtime.passes import Manager, MakeStateful
+    try:
+        from openvino.runtime.passes import Manager, MakeStateful
+    except ImportError:
+        from openvino.passes import Manager, MakeStateful
 
     inputs  = ov_model.inputs
     outputs = ov_model.outputs
