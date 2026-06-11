@@ -49,24 +49,44 @@ class FlatWrapper(nn.Module):
         self.n_full  = model.model.num_full_layers
         self.n_lin   = model.model.num_linear_layers
 
-    def forward(self, *args: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        # args layout:
-        #   input_ids, position_ids,
-        #   k_cache_0 .. k_cache_{n_full-1},
-        #   v_cache_0 .. v_cache_{n_full-1},
-        #   conv_state_0 .. conv_state_{n_lin-1},
-        #   rec_state_0  .. rec_state_{n_lin-1}
-        input_ids, position_ids = args[0], args[1]
-        i = 2
-        k_caches    = list(args[i : i + self.n_full]);  i += self.n_full
-        v_caches    = list(args[i : i + self.n_full]);  i += self.n_full
-        conv_states = list(args[i : i + self.n_lin]);   i += self.n_lin
-        rec_states  = list(args[i : i + self.n_lin]);   i += self.n_lin
-
-        logits, k_out, v_out, conv_out, rec_out = self.model(
-            input_ids, position_ids, k_caches, v_caches, conv_states, rec_states
-        )
-        return (logits, *k_out, *v_out, *conv_out, *rec_out)
+        # Dynamically compile forward method with explicit arguments (no *args list unpacking)
+        # to avoid C++ segmentation faults in OpenVINO's JIT frontend.
+        args_list = ["self", "input_ids", "position_ids"]
+        for i in range(self.n_full):
+            args_list.append(f"k_cache_{i}")
+        for i in range(self.n_full):
+            args_list.append(f"v_cache_{i}")
+        for i in range(self.n_lin):
+            args_list.append(f"conv_state_{i}")
+        for i in range(self.n_lin):
+            args_list.append(f"rec_state_{i}")
+            
+        args_str = ", ".join(args_list)
+        
+        body = []
+        if self.n_full > 0:
+            body.append(f"    k_caches = [{', '.join(f'k_cache_{i}' for i in range(self.n_full))}]")
+            body.append(f"    v_caches = [{', '.join(f'v_cache_{i}' for i in range(self.n_full))}]")
+        else:
+            body.append("    k_caches = []")
+            body.append("    v_caches = []")
+            
+        if self.n_lin > 0:
+            body.append(f"    conv_states = [{', '.join(f'conv_state_{i}' for i in range(self.n_lin))}]")
+            body.append(f"    rec_states = [{', '.join(f'rec_state_{i}' for i in range(self.n_lin))}]")
+        else:
+            body.append("    conv_states = []")
+            body.append("    rec_states = []")
+            
+        body.append("    logits, k_out, v_out, conv_out, rec_out = self.model(input_ids, position_ids, k_caches, v_caches, conv_states, rec_states)")
+        body.append("    return (logits, *k_out, *v_out, *conv_out, *rec_out)")
+        
+        code = f"def forward({args_str}):\n" + "\n".join(body)
+        
+        locs = {}
+        exec(code, globals(), locs)
+        import types
+        self.forward = types.MethodType(locs["forward"], self)
 
 
 def build_example_inputs(model: QwenForCausalLM, max_seq: int = 8):
@@ -170,6 +190,7 @@ def main() -> int:
     ov_model = ov.convert_model(wrapper, example_input=example_inputs)
     print(f"  OK ({time.time()-t0:.1f}s)")
     ov_model.outputs[0].set_names({"logits"})
+
 
     # 6. Save IR
     ir_xml = output_dir / "openvino_model.xml"
