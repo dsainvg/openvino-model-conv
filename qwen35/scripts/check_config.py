@@ -1,50 +1,57 @@
-"""Print Qwen/Qwen3.5-4B config and local exporter support."""
+"""Print Qwen/Qwen3.5-4B config and package versions."""
 from __future__ import annotations
 
 import argparse
+import json
+import importlib.metadata
 from pathlib import Path
-
-from convert_to_openvino import (
-    DEFAULT_MODEL,
-    check_openvino_exporter,
-    check_transformers_config,
-    package_version,
-    read_config,
-)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check Qwen/Qwen3.5-4B conversion support.")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="HF model id or local checkpoint directory.")
-    parser.add_argument("--task", default="image-text-to-text")
-    parser.add_argument("--revision", default="main")
-    parser.add_argument("--cache-dir", type=Path, default=None)
-    parser.add_argument("--local-files-only", action="store_true")
-    parser.add_argument("--force-download", action="store_true")
-    parser.add_argument("--token", nargs="?", const="true", default=None)
+    parser = argparse.ArgumentParser(description="Check Qwen/Qwen3.5-4B configuration.")
+    parser.add_argument("--model-dir", type=Path, default=None,
+                        help="Path to the downloaded model checkpoint directory.")
     return parser.parse_args()
+
+
+def get_pkg_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed"
 
 
 def main() -> int:
     args = parse_args()
-    config, path = read_config(args)
-    model_type = str(config.get("model_type", ""))
-    exporter_ok, reason = check_openvino_exporter(model_type, args.task)
-
-    print(f"config:        {path}")
-    print(f"model_type:    {model_type}")
-    print(f"architectures: {config.get('architectures')}")
-    print(f"text_type:     {(config.get('text_config') or {}).get('model_type')}")
-    print(f"vision_type:   {(config.get('vision_config') or {}).get('model_type')}")
-    print(f"transformers:  {package_version('transformers')}")
-    print(f"optimum-intel: {package_version('optimum-intel')}")
-    print(f"tf config ok:  {check_transformers_config(model_type)}")
-    print(f"ov export ok:  {exporter_ok}")
-    if not exporter_ok:
-        print(f"reason:        {reason}")
-        return 1
+    
+    print("Package Versions:")
+    print(f"  transformers:  {get_pkg_version('transformers')}")
+    print(f"  openvino:      {get_pkg_version('openvino')}")
+    print(f"  optimum-intel: {get_pkg_version('optimum-intel')}")
+    
+    if args.model_dir:
+        config_path = Path(args.model_dir) / "config.json"
+        if not config_path.exists():
+            print(f"\nERROR: config.json not found in {args.model_dir}")
+            return 1
+        
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+            
+        text_cfg = cfg.get("text_config", cfg)
+        print(f"\nModel Configuration ({config_path}):")
+        print(f"  model_type:             {cfg.get('model_type', 'unknown')}")
+        print(f"  hidden_size:            {text_cfg.get('hidden_size')}")
+        print(f"  num_hidden_layers:      {text_cfg.get('num_hidden_layers')}")
+        print(f"  vocab_size:             {text_cfg.get('vocab_size')}")
+        print(f"  full_attention_interval: {text_cfg.get('full_attention_interval', 4)}")
+        print(f"  layer_types:            {text_cfg.get('layer_types')}")
+    else:
+        print("\nPass --model-dir to print configuration of a downloaded model.")
+        
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

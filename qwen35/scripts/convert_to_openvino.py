@@ -81,6 +81,18 @@ def build_example_inputs(model: QwenForCausalLM, max_seq: int = 8):
     )
 
 
+def copy_non_weights_files(src_dir: Path, dst_dir: Path) -> None:
+    import shutil
+    # List of extensions to ignore (weights/tensors)
+    ignore_suffixes = {".safetensors", ".bin", ".pt", ".ckpt", ".h5", ".msgpack", ".ot"}
+    for item in src_dir.iterdir():
+        if item.is_file():
+            if item.suffix.lower() not in ignore_suffixes:
+                dst_file = dst_dir / item.name
+                print(f"  copying {item.name} ...")
+                shutil.copy2(item, dst_file)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -166,6 +178,10 @@ def main() -> int:
     print(f"\nSaved IR:")
     print(f"  {ir_xml}  ({ir_xml.stat().st_size/1e6:.1f} MB)")
     print(f"  {ir_bin}  ({ir_bin.stat().st_size/1e6:.1f} MB)")
+
+    # Copy tokenizer and config files
+    print("\nCopying tokenizer and config files ...")
+    copy_non_weights_files(model_dir, output_dir)
 
     # 7. Optional compile check + numerical sanity
     if args.compile_check:
