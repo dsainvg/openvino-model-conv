@@ -254,6 +254,15 @@ def _make_stateful(
     manager = Manager()
     manager.register_pass(MakeStateful(tensor_names))
     manager.run_passes(ov_model)
+
+    # Explicitly set names for the remaining public inputs and outputs
+    # (prevents unnamed tensor crashes and standardizes name signatures)
+    ov_model.inputs[0].set_names({"input_ids"})
+    ov_model.inputs[1].set_names({"attention_mask"})
+    ov_model.inputs[2].set_names({"position_ids"})
+    ov_model.inputs[3].set_names({"beam_idx"})
+    ov_model.outputs[0].set_names({"logits"})
+
     return ov_model
 
 
