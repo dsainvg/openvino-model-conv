@@ -57,32 +57,43 @@ def dummy_model_dir():
             vocab_size=128,
         )
 
-        # Write config.json
+        # Write config.json in the EXACT same structure as the real Qwen3.5-4B
+        # config.json on HuggingFace: text_config nested, partial_rotary_factor
+        # and rope_theta inside rope_parameters. This ensures the parser is
+        # tested against the real layout, not a simplified fixture.
         config_dict = {
-            "hidden_size": cfg.hidden_size,
-            "num_hidden_layers": cfg.num_hidden_layers,
-            "vocab_size": cfg.vocab_size,
-            "num_attention_heads": cfg.num_attention_heads,
-            "num_key_value_heads": cfg.num_key_value_heads,
-            "head_dim": cfg.head_dim,
-            "partial_rotary_factor": cfg.partial_rotary_factor,
-            "rope_parameters": {"rope_theta": cfg.rope_theta},
-            "max_position_embeddings": cfg.max_position_embeddings,
-            "linear_num_value_heads": cfg.linear_num_value_heads,
-            "linear_num_key_heads": cfg.linear_num_key_heads,
-            "linear_key_head_dim": cfg.linear_key_head_dim,
-            "linear_value_head_dim": cfg.linear_value_head_dim,
-            "linear_conv_kernel_dim": cfg.linear_conv_kernel_dim,
-            "intermediate_size": cfg.intermediate_size,
-            "full_attention_interval": cfg.full_attention_interval,
-            "rms_norm_eps": cfg.rms_norm_eps,
-            "hidden_act": cfg.hidden_act,
-            "bos_token_id": cfg.bos_token_id,
-            "eos_token_id": cfg.eos_token_id,
-            "pad_token_id": cfg.pad_token_id,
+            "model_type": "qwen3_5",
+            "text_config": {
+                "hidden_size": cfg.hidden_size,
+                "num_hidden_layers": cfg.num_hidden_layers,
+                "vocab_size": cfg.vocab_size,
+                "num_attention_heads": cfg.num_attention_heads,
+                "num_key_value_heads": cfg.num_key_value_heads,
+                "head_dim": cfg.head_dim,
+                # partial_rotary_factor lives inside rope_parameters in the real config
+                "rope_parameters": {
+                    "rope_theta": cfg.rope_theta,
+                    "partial_rotary_factor": cfg.partial_rotary_factor,
+                },
+                "max_position_embeddings": cfg.max_position_embeddings,
+                "linear_num_value_heads": cfg.linear_num_value_heads,
+                "linear_num_key_heads": cfg.linear_num_key_heads,
+                "linear_key_head_dim": cfg.linear_key_head_dim,
+                "linear_value_head_dim": cfg.linear_value_head_dim,
+                "linear_conv_kernel_dim": cfg.linear_conv_kernel_dim,
+                "intermediate_size": cfg.intermediate_size,
+                "full_attention_interval": cfg.full_attention_interval,
+                "layer_types": list(cfg.layer_types),
+                "rms_norm_eps": cfg.rms_norm_eps,
+                "hidden_act": cfg.hidden_act,
+                "bos_token_id": cfg.bos_token_id,
+                "eos_token_id": cfg.eos_token_id,
+                "pad_token_id": cfg.pad_token_id,
+                "attention_bias": False,
+                "attn_output_gate": True,
+            }
         }
-        
-        # We can nest it under text_config or at top level. Let's do top level.
+
         with open(tmp_path / "config.json", "w", encoding="utf-8") as f:
             json.dump(config_dict, f, indent=2)
 

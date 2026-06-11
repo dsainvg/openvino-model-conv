@@ -24,7 +24,7 @@ class Qwen35Config:
     # --- core ---
     hidden_size: int = 2560
     num_hidden_layers: int = 32
-    vocab_size: int = 152064
+    vocab_size: int = 248320
 
     # --- full-attention layers ---
     num_attention_heads: int = 16
@@ -104,6 +104,11 @@ class Qwen35Config:
 
         Qwen3.5-4B is a VLM; the text backbone lives under text_config.
         Falls back to the top-level if text_config is absent (text-only fork).
+
+        Field location notes (verified against real Qwen/Qwen3.5-4B config.json):
+          - partial_rotary_factor lives inside text_config.rope_parameters
+          - rope_theta lives inside text_config.rope_parameters
+          - layer_types is a flat list inside text_config
         """
         model_dir = Path(model_dir)
         with open(model_dir / "config.json", encoding="utf-8") as fh:
@@ -111,6 +116,21 @@ class Qwen35Config:
 
         # VLM layout: text backbone is nested under text_config
         text = raw.get("text_config", raw)
+        rope_params = text.get("rope_parameters", {})
+
+        # partial_rotary_factor: real config nests it in rope_parameters;
+        # test fixtures may write it at top level — check both.
+        partial_rotary_factor = (
+            rope_params.get("partial_rotary_factor")
+            or text.get("partial_rotary_factor")
+            or 0.25  # Qwen3.5-4B architectural default
+        )
+
+        rope_theta = (
+            rope_params.get("rope_theta")
+            or text.get("rope_theta")
+            or 10_000_000.0
+        )
 
         layer_types_raw = text.get("layer_types")
         layer_types = tuple(layer_types_raw) if layer_types_raw else None
@@ -124,8 +144,8 @@ class Qwen35Config:
             head_dim=text["head_dim"],
             attention_bias=text.get("attention_bias", False),
             attn_output_gate=text.get("attn_output_gate", True),
-            partial_rotary_factor=text["partial_rotary_factor"],
-            rope_theta=text.get("rope_parameters", {}).get("rope_theta", 10_000_000.0),
+            partial_rotary_factor=partial_rotary_factor,
+            rope_theta=rope_theta,
             max_position_embeddings=text["max_position_embeddings"],
             linear_num_value_heads=text["linear_num_value_heads"],
             linear_num_key_heads=text["linear_num_key_heads"],
