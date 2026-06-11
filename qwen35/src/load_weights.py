@@ -78,7 +78,7 @@ def load_plain_tensor(
     model_dir = Path(model_dir)
     shard = model_dir / weight_map[name]
     with safe_open(str(shard), framework="pt") as fh:
-        return fh.get_tensor(name)
+        return fh.get_tensor(name).clone()
 
 
 def _load_safetensors_weight(
