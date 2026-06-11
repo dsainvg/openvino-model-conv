@@ -222,7 +222,7 @@ def _make_stateful(
     num_full: int,
     num_linear: int,
 ) -> ov.Model:
-    """Bind state input ports to state output ports with make_stateful.
+    """Bind state input ports to state output ports with MakeStateful.
 
     Input port order  (after input_ids, attention_mask, position_ids, beam_idx):
         k_cache_0..N-1, v_cache_0..N-1, conv_0..M-1, rec_0..M-1
@@ -231,6 +231,8 @@ def _make_stateful(
 
     where N = num_full, M = num_linear.
     """
+    from openvino.runtime.passes import Manager, MakeStateful
+
     inputs  = ov_model.inputs
     outputs = ov_model.outputs
 
@@ -240,13 +242,15 @@ def _make_stateful(
     STATE_OUTPUT_OFFSET = 1
 
     n_states = 2 * num_full + 2 * num_linear
-    pairs = []
+    tensor_names = {}
     for k in range(n_states):
         inp_port = inputs[STATE_INPUT_OFFSET + k]
         out_port = outputs[STATE_OUTPUT_OFFSET + k]
-        pairs.append((inp_port, out_port))
+        tensor_names[inp_port.any_name] = out_port.any_name
 
-    ov_model = ov.make_stateful(pairs)
+    manager = Manager()
+    manager.register_pass(MakeStateful(tensor_names))
+    manager.run_passes(ov_model)
     return ov_model
 
 
