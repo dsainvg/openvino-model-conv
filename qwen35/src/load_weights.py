@@ -132,6 +132,20 @@ def _find_layer_prefix(weight_map: dict[str, str], layer_idx: int) -> str:
     raise KeyError(f"Could not find layer prefix for layer {layer_idx} in weight_map")
 
 
+def load_linear_weight(
+    weight_map: dict[str, str],
+    model_dir: Path,
+    prefix: str,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Load a linear layer's weight. If GPTQ int4 quantized, dequantize on-the-fly."""
+    if f"{prefix}.qweight" in weight_map:
+        from .gptq_dequant import load_gptq_linear
+        return load_gptq_linear(weight_map, model_dir, prefix, out_dtype=out_dtype)
+    else:
+        return _load_safetensors_weight(weight_map, model_dir, f"{prefix}.weight", out_dtype)
+
+
 def load_layer_weights(
     layer: QwenDecoderLayer,
     layer_idx: int,
@@ -142,7 +156,7 @@ def load_layer_weights(
     """Populate one decoder layer's parameters from the safetensors checkpoint."""
     P = _find_layer_prefix(weight_map, layer_idx)
 
-    # Per-layer norms
+    # Per-layer norms (always plain tensors, never quantized)
     _set_param(
         layer.input_layernorm, "weight",
         _load_safetensors_weight(weight_map, model_dir, f"{P}.input_layernorm.weight", out_dtype),
@@ -156,23 +170,23 @@ def load_layer_weights(
     if layer.layer_type == "linear_attention":
         att: QwenGatedDeltaNet = layer.attn  # type: ignore[assignment]
         lp = f"{P}.linear_attn"
-        _set_param(att.in_proj_qkv, "weight", _load_safetensors_weight(weight_map, model_dir, f"{lp}.in_proj_qkv.weight", out_dtype))
-        _set_param(att.in_proj_z,   "weight", _load_safetensors_weight(weight_map, model_dir, f"{lp}.in_proj_z.weight", out_dtype))
-        _set_param(att.in_proj_b,   "weight", _load_safetensors_weight(weight_map, model_dir, f"{lp}.in_proj_b.weight", out_dtype))
-        _set_param(att.in_proj_a,   "weight", _load_safetensors_weight(weight_map, model_dir, f"{lp}.in_proj_a.weight", out_dtype))
+        _set_param(att.in_proj_qkv, "weight", load_linear_weight(weight_map, model_dir, f"{lp}.in_proj_qkv", out_dtype))
+        _set_param(att.in_proj_z,   "weight", load_linear_weight(weight_map, model_dir, f"{lp}.in_proj_z", out_dtype))
+        _set_param(att.in_proj_b,   "weight", load_linear_weight(weight_map, model_dir, f"{lp}.in_proj_b", out_dtype))
+        _set_param(att.in_proj_a,   "weight", load_linear_weight(weight_map, model_dir, f"{lp}.in_proj_a", out_dtype))
         _set_param(att.conv1d,      "weight", _load_safetensors_weight(weight_map, model_dir, f"{lp}.conv1d.weight", out_dtype))
         _set_param(att, "dt_bias",            _load_safetensors_weight(weight_map, model_dir, f"{lp}.dt_bias", out_dtype))
         _set_param(att, "A_log",              _load_safetensors_weight(weight_map, model_dir, f"{lp}.A_log", out_dtype))
         _set_param(att.norm,        "weight", _load_safetensors_weight(weight_map, model_dir, f"{lp}.norm.weight", out_dtype))
-        _set_param(att.out_proj,    "weight", _load_safetensors_weight(weight_map, model_dir, f"{lp}.out_proj.weight", out_dtype))
+        _set_param(att.out_proj,    "weight", load_linear_weight(weight_map, model_dir, f"{lp}.out_proj", out_dtype))
 
     elif layer.layer_type == "full_attention":
         att_full: QwenAttention = layer.attn  # type: ignore[assignment]
         sp = f"{P}.self_attn"
-        _set_param(att_full.q_proj, "weight", _load_safetensors_weight(weight_map, model_dir, f"{sp}.q_proj.weight", out_dtype))
-        _set_param(att_full.k_proj, "weight", _load_safetensors_weight(weight_map, model_dir, f"{sp}.k_proj.weight", out_dtype))
-        _set_param(att_full.v_proj, "weight", _load_safetensors_weight(weight_map, model_dir, f"{sp}.v_proj.weight", out_dtype))
-        _set_param(att_full.o_proj, "weight", _load_safetensors_weight(weight_map, model_dir, f"{sp}.o_proj.weight", out_dtype))
+        _set_param(att_full.q_proj, "weight", load_linear_weight(weight_map, model_dir, f"{sp}.q_proj", out_dtype))
+        _set_param(att_full.k_proj, "weight", load_linear_weight(weight_map, model_dir, f"{sp}.k_proj", out_dtype))
+        _set_param(att_full.v_proj, "weight", load_linear_weight(weight_map, model_dir, f"{sp}.v_proj", out_dtype))
+        _set_param(att_full.o_proj, "weight", load_linear_weight(weight_map, model_dir, f"{sp}.o_proj", out_dtype))
         _set_param(att_full.q_norm, "weight", _load_safetensors_weight(weight_map, model_dir, f"{sp}.q_norm.weight", out_dtype))
         _set_param(att_full.k_norm, "weight", _load_safetensors_weight(weight_map, model_dir, f"{sp}.k_norm.weight", out_dtype))
 
@@ -180,9 +194,9 @@ def load_layer_weights(
         raise ValueError(f"Unknown layer_type {layer.layer_type!r}")
 
     # MLP
-    _set_param(layer.mlp.gate_proj, "weight", _load_safetensors_weight(weight_map, model_dir, f"{P}.mlp.gate_proj.weight", out_dtype))
-    _set_param(layer.mlp.up_proj,   "weight", _load_safetensors_weight(weight_map, model_dir, f"{P}.mlp.up_proj.weight", out_dtype))
-    _set_param(layer.mlp.down_proj, "weight", _load_safetensors_weight(weight_map, model_dir, f"{P}.mlp.down_proj.weight", out_dtype))
+    _set_param(layer.mlp.gate_proj, "weight", load_linear_weight(weight_map, model_dir, f"{P}.mlp.gate_proj", out_dtype))
+    _set_param(layer.mlp.up_proj,   "weight", load_linear_weight(weight_map, model_dir, f"{P}.mlp.up_proj", out_dtype))
+    _set_param(layer.mlp.down_proj, "weight", load_linear_weight(weight_map, model_dir, f"{P}.mlp.down_proj", out_dtype))
 
 
 def load_global_weights(
@@ -206,11 +220,17 @@ def load_global_weights(
         "lm_head.weight",
         "model.language_model.lm_head.weight",
         "language_model.lm_head.weight",
+        "lm_head.qweight",
+        "model.language_model.lm_head.qweight",
+        "language_model.lm_head.qweight",
     ]
 
     embed_key = _find_key(weight_map, "embed_tokens.weight", embed_candidates)
     norm_key = _find_key(weight_map, "norm.weight", norm_candidates)
-    lm_head_key = _find_key(weight_map, "lm_head.weight", lm_head_candidates)
+    try:
+        lm_head_key = _find_key(weight_map, "lm_head.weight", lm_head_candidates)
+    except KeyError:
+        lm_head_key = _find_key(weight_map, "lm_head.qweight", lm_head_candidates)
 
     _set_param(
         model.model.embed_tokens, "weight",
@@ -220,9 +240,17 @@ def load_global_weights(
         model.model.norm, "weight",
         _load_safetensors_weight(weight_map, model_dir, norm_key, out_dtype),
     )
+
+    if lm_head_key.endswith(".qweight"):
+        lm_head_prefix = lm_head_key[:-8]
+    elif lm_head_key.endswith(".weight"):
+        lm_head_prefix = lm_head_key[:-7]
+    else:
+        lm_head_prefix = lm_head_key
+
     _set_param(
         model.lm_head, "weight",
-        _load_safetensors_weight(weight_map, model_dir, lm_head_key, out_dtype),
+        load_linear_weight(weight_map, model_dir, lm_head_prefix, out_dtype),
     )
 
 
