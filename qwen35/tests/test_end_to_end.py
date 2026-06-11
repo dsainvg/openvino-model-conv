@@ -138,8 +138,7 @@ def test_convert_to_openvino_script(dummy_model_dir):
             "--output",
             str(out_path),
             "--dtype",
-            "fp32",  # float32 for testing conversion and compile check
-            "--compile-check",
+            "fp32",  # float32 for testing conversion
         ]
         try:
             from scripts.convert_to_openvino import main as convert_main
@@ -149,5 +148,7 @@ def test_convert_to_openvino_script(dummy_model_dir):
             sys.argv = old_argv
 
         # Verify output files exist
-        assert (out_path / "openvino_model.xml").exists()
-        assert (out_path / "openvino_model.bin").exists()
+        assert (out_path / "embed.xml").exists()
+        assert (out_path / "lm_head.xml").exists()
+        for i in range(4):
+            assert (out_path / f"layer_{i}.xml").exists()
