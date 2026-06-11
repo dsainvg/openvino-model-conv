@@ -301,21 +301,25 @@ def main() -> int:
     print("\nCopying tokenizer and config files ...")
     copy_non_weights_files(model_dir, output_dir)
 
-    # 7. Optional compile check + numerical sanity
     if args.compile_check:
-        print("\nCompile-check: reloading IR on CPU ...")
+        def print_direct(*args, **kwargs):
+            import sys
+            print(*args, **kwargs, file=sys.__stdout__)
+            sys.__stdout__.flush()
+
+        print_direct("\nCompile-check: reloading IR on CPU ...")
         core     = ov.Core()
-        print(f"  available devices: {core.available_devices}")
+        print_direct(f"  available devices: {core.available_devices}")
         compiled = core.compile_model(str(ir_xml), "CPU")
-        print(f"  compiled — {len(compiled.inputs)} inputs / {len(compiled.outputs)} outputs")
-        
+        print_direct(f"  compiled — {len(compiled.inputs)} inputs / {len(compiled.outputs)} outputs")
+
         # Build inputs dict by matching string names to prevent crashes due to port reordering
         ov_inputs = {}
-        print("\n--- Compile-check Debug Info ---")
-        print("Expected input names order:", input_names)
-        print("Compiled model inputs:")
+        print_direct("\n--- Compile-check Debug Info ---")
+        print_direct(f"Expected input names order: {input_names}")
+        print_direct("Compiled model inputs:")
         for idx, inp in enumerate(compiled.inputs):
-            print(f"  Compiled Input {idx}: names={inp.get_names()}, any_name={inp.get_any_name()}, shape={inp.get_partial_shape()}, type={inp.get_element_type()}")
+            print_direct(f"  Compiled Input {idx}: names={inp.get_names()}, any_name={inp.get_any_name()}, shape={inp.get_partial_shape()}, type={inp.get_element_type()}")
         
         for inp in compiled.inputs:
             name = inp.get_any_name()
@@ -323,18 +327,17 @@ def main() -> int:
                 idx = input_names.index(name)
                 val = example_inputs[idx].numpy()
                 ov_inputs[inp] = val
-                print(f"  Mapped {name} -> array shape={val.shape}, dtype={val.dtype}")
+                print_direct(f"  Mapped {name} -> array shape={val.shape}, dtype={val.dtype}")
             else:
                 raise ValueError(f"Compiled model has unexpected input: {name}")
 
-        print("Compiled model outputs:")
+        print_direct("Compiled model outputs:")
         for idx, out in enumerate(compiled.outputs):
-            print(f"  Compiled Output {idx}: names={out.get_names()}, shape={out.get_partial_shape()}, type={out.get_element_type()}")
+            print_direct(f"  Compiled Output {idx}: names={out.get_names()}, shape={out.get_partial_shape()}, type={out.get_element_type()}")
 
-        print("Invoking compiled model...")
-        sys.stdout.flush()
+        print_direct("Invoking compiled model...")
         ov_result = compiled(ov_inputs)
-        print("Invocation successful!")
+        print_direct("Invocation successful!")
 
         # Retrieve logits safely by name
         logits_output = None
