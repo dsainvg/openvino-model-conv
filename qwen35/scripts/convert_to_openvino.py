@@ -201,11 +201,6 @@ def main() -> int:
     print(f"  logits shape : {tuple(ref_logits.shape)}")
     print(f"  logits finite: {torch.isfinite(ref_logits).all().item()}")
 
-    # 5. ov.convert_model directly (no intermediate ONNX export needed, bypasses JIT bugs)
-    print("\nConverting model directly to OpenVINO ...")
-    t0 = time.time()
-    ov_model = ov.convert_model(wrapper, example_input=example_inputs)
-
     # Define input and output names in order
     input_names = ["input_ids", "position_ids"]
     for i in range(wrapper.n_full):
@@ -227,7 +222,51 @@ def main() -> int:
     for i in range(wrapper.n_lin):
         output_names.append(f"rec_state_out_{i}")
 
-    # Set input and output names by index
+    # 5. Export to ONNX first, then convert to OpenVINO IR (prevents Linux PyTorch JIT frontend segfaults)
+    onnx_path = output_dir / "model.onnx"
+    print(f"\nExporting PyTorch model to intermediate ONNX at {onnx_path} ...")
+    t0 = time.time()
+
+    dynamic_axes = {
+        "input_ids": {0: "batch_size", 1: "seq_len"},
+        "position_ids": {0: "batch_size", 1: "seq_len"},
+        "logits": {0: "batch_size", 1: "seq_len"},
+    }
+    for i in range(wrapper.n_full):
+        dynamic_axes[f"k_cache_{i}"] = {0: "batch_size", 2: "seq_len"}
+        dynamic_axes[f"v_cache_{i}"] = {0: "batch_size", 2: "seq_len"}
+        dynamic_axes[f"k_cache_out_{i}"] = {0: "batch_size", 2: "seq_len"}
+        dynamic_axes[f"v_cache_out_{i}"] = {0: "batch_size", 2: "seq_len"}
+    for i in range(wrapper.n_lin):
+        dynamic_axes[f"conv_state_{i}"] = {0: "batch_size"}
+        dynamic_axes[f"rec_state_{i}"] = {0: "batch_size"}
+        dynamic_axes[f"conv_state_out_{i}"] = {0: "batch_size"}
+        dynamic_axes[f"rec_state_out_{i}"] = {0: "batch_size"}
+
+    torch.onnx.export(
+        wrapper,
+        example_inputs,
+        str(onnx_path),
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        opset_version=18,
+        do_constant_folding=True,
+    )
+    print(f"  ONNX export OK ({time.time()-t0:.1f}s)")
+
+    print("\nConverting ONNX model to OpenVINO ...")
+    t0 = time.time()
+    ov_model = ov.convert_model(str(onnx_path))
+    print(f"  convert_model OK ({time.time()-t0:.1f}s)")
+
+    # Clean up the intermediate ONNX model to save disk space
+    try:
+        onnx_path.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"Warning: could not delete temporary ONNX file {onnx_path}: {e}")
+
+    # Set input and output names explicitly
     for idx, name in enumerate(input_names):
         ov_model.inputs[idx].set_names({name})
     for idx, name in enumerate(output_names):
@@ -269,9 +308,29 @@ def main() -> int:
         print(f"  available devices: {core.available_devices}")
         compiled = core.compile_model(str(ir_xml), "CPU")
         print(f"  compiled — {len(compiled.inputs)} inputs / {len(compiled.outputs)} outputs")
-        ov_inputs = {compiled.inputs[i]: example_inputs[i].numpy() for i in range(len(compiled.inputs))}
+        
+        # Build inputs dict by matching string names to prevent crashes due to port reordering
+        ov_inputs = {}
+        for inp in compiled.inputs:
+            name = inp.get_any_name()
+            if name in input_names:
+                idx = input_names.index(name)
+                ov_inputs[inp] = example_inputs[idx].numpy()
+            else:
+                raise ValueError(f"Compiled model has unexpected input: {name}")
+
         ov_result = compiled(ov_inputs)
-        ov_logits = torch.from_numpy(ov_result[compiled.outputs[0]])
+
+        # Retrieve logits safely by name
+        logits_output = None
+        for out in compiled.outputs:
+            if "logits" in out.get_names():
+                logits_output = out
+                break
+        if logits_output is None:
+            logits_output = compiled.outputs[0]
+
+        ov_logits = torch.from_numpy(ov_result[logits_output])
         diff      = (ref_logits.float() - ov_logits.float()).abs()
         pt_next   = ref_logits[0, -1].float().argmax().item()
         ov_next   = ov_logits[0, -1].float().argmax().item()
