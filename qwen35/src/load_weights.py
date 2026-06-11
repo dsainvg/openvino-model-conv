@@ -58,16 +58,13 @@ from .modeling import (
 def _set_param(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
     """Set a parameter or buffer by attribute name without triggering autograd.
 
-    The tensor is stored in its own dtype (as loaded from disk).
-    We do NOT force attr.dtype so that bf16 weights stay bf16.
-    The wrapper is cast to out_dtype wholesale after all weights are loaded.
+    Copies values in-place to the existing parameter to avoid memory allocations.
     """
     attr = getattr(module, name)
     with torch.no_grad():
         if tensor.shape != attr.shape:
             raise ValueError(f"shape mismatch for {name}: got {tuple(tensor.shape)}, expected {tuple(attr.shape)}")
-        # Resize the underlying storage to the incoming dtype then copy
-        attr.data = tensor.clone()
+        attr.copy_(tensor)
 
 
 def load_plain_tensor(
@@ -81,7 +78,7 @@ def load_plain_tensor(
     model_dir = Path(model_dir)
     shard = model_dir / weight_map[name]
     with safe_open(str(shard), framework="pt") as fh:
-        return fh.get_tensor(name).clone()
+        return fh.get_tensor(name)
 
 
 def _load_safetensors_weight(
@@ -90,7 +87,10 @@ def _load_safetensors_weight(
     name: str,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    return load_plain_tensor(weight_map, model_dir, name).to(out_dtype)
+    tensor = load_plain_tensor(weight_map, model_dir, name)
+    if tensor.dtype != out_dtype:
+        return tensor.to(out_dtype)
+    return tensor
 
 
 def build_shard_index(model_dir: Path | str) -> dict[str, str]:

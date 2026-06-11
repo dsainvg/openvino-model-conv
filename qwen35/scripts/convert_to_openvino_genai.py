@@ -77,6 +77,7 @@ from src.load_weights import (
     _find_key,
     _load_safetensors_weight,
     load_linear_weight,
+    _set_param,
 )
 from src.modeling import QwenDecoderLayer, QwenForCausalLM
 from src.split_inference import QwenGenAIWrapper
@@ -128,7 +129,13 @@ def _load_full_model(
 ) -> QwenForCausalLM:
     """Build the full QwenForCausalLM and load all weights layer-by-layer."""
     print("  Allocating shell model...")
-    model = QwenForCausalLM(cfg)
+    # Set default dtype to prevent PyTorch from allocating 16GB of FP32 parameters initially
+    old_default = torch.get_default_dtype()
+    torch.set_default_dtype(out_dtype)
+    try:
+        model = QwenForCausalLM(cfg)
+    finally:
+        torch.set_default_dtype(old_default)
 
     # ── Embedding ──────────────────────────────────────────────────────
     embed_key = _find_key(weight_map, "embed_tokens.weight", [
@@ -136,7 +143,8 @@ def _load_full_model(
         "language_model.model.embed_tokens.weight",
         "model.embed_tokens.weight",
     ])
-    model.model.embed_tokens.weight.data = (
+    _set_param(
+        model.model.embed_tokens, "weight",
         _load_safetensors_weight(weight_map, model_dir, embed_key, out_dtype)
     )
     print(f"  embed_tokens ✓")
@@ -153,7 +161,8 @@ def _load_full_model(
         "language_model.model.norm.weight",
         "model.norm.weight",
     ])
-    model.model.norm.weight.data = (
+    _set_param(
+        model.model.norm, "weight",
         _load_safetensors_weight(weight_map, model_dir, norm_key, out_dtype)
     )
 
@@ -168,14 +177,21 @@ def _load_full_model(
         lm_weight  = load_linear_weight(weight_map, model_dir, lm_prefix, out_dtype)
     except KeyError:
         print("  (lm_head not in checkpoint — tie_word_embeddings, reusing embed weight)")
-        lm_weight = model.model.embed_tokens.weight.data.clone()
+        lm_weight = model.model.embed_tokens.weight.data
 
     if lm_weight.shape != model.lm_head.weight.shape:
-        model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False)
-    model.lm_head.weight.data = lm_weight
+        # Re-create lm_head using the target default dtype if shape/vocab size is different
+        old_default = torch.get_default_dtype()
+        torch.set_default_dtype(out_dtype)
+        try:
+            model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False)
+        finally:
+            torch.set_default_dtype(old_default)
+
+    _set_param(model.lm_head, "weight", lm_weight)
     print("  lm_head ✓")
 
-    return model.eval().to(out_dtype)
+    return model.eval()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,65 +395,37 @@ def main() -> int:
     ov_model = ov.convert_model(wrapper, example_input=example_inputs)
     print(f"  Trace complete ({time.time()-t0:.1f}s)")
 
-    # ─────────────────────────────────────────────────────────────────
-    # 4. Make stateful (bind state in → state out as ReadValue/Assign)
-    # ─────────────────────────────────────────────────────────────────
-    print("\n[4/5] Making stateful (binding KV/recurrent state)...")
-    ov_model = _make_stateful(ov_model, num_full, num_linear)
-    print("  Stateful wiring done.")
-    print(f"  Public inputs  : {[i.any_name for i in ov_model.inputs]}")
-    print(f"  Public outputs : {[o.any_name for o in ov_model.outputs]}")
-
     # Free PyTorch model memory before INT4 (NNCF needs headroom)
     del full_model, wrapper
     gc.collect()
 
     # ─────────────────────────────────────────────────────────────────
-    # 5a. INT4 compression
+    # 4. INT4 compression (on stateless model)
     # ─────────────────────────────────────────────────────────────────
-    print("\n[5/5] Saving model...")
-    xml_path = str(output_dir / "openvino_model.xml")
-
     if use_int4:
-        print(f"  Applying NNCF INT4_SYM (group_size={group_size}) in a subprocess to avoid OOM...")
+        print(f"  Applying NNCF INT4_SYM (group_size={group_size})...")
         t0 = time.time()
-        
-        # Save temporary FP16 model first
-        temp_xml = output_dir / "temp_fp16.xml"
-        ov.save_model(ov_model, str(temp_xml), compress_to_fp16=True)
-        
-        # Free memory in current process immediately
-        del ov_model
-        gc.collect()
-        
-        # Run compression in a fresh subprocess to release all PyTorch and tracing RAM
-        import subprocess
-        cmd = [
-            sys.executable, "-c",
-            f"import openvino as ov, nncf; "
-            f"from nncf import compress_weights, CompressWeightsMode; "
-            f"core = ov.Core(); "
-            f"model = core.read_model(r'{temp_xml}'); "
-            f"compressed = compress_weights(model, mode=CompressWeightsMode.INT4_SYM, group_size={group_size}, ratio=1.0); "
-            f"ov.save_model(compressed, r'{xml_path}', compress_to_fp16=True)"
-        ]
-        
-        res = subprocess.run(cmd)
-        if res.returncode != 0:
-            raise RuntimeError(f"NNCF compression failed with code {res.returncode}")
-            
+        ov_model = compress_weights(
+            ov_model,
+            mode=CompressWeightsMode.INT4_SYM,
+            group_size=group_size,
+            ratio=1.0,
+        )
         print(f"  INT4 compression done ({time.time()-t0:.1f}s)")
-        
-        # Clean up temporary files
-        try:
-            temp_xml.unlink()
-            (output_dir / "temp_fp16.bin").unlink()
-        except Exception:
-            pass
-    else:
-        ov.save_model(ov_model, xml_path, compress_to_fp16=True)
-        del ov_model
-        gc.collect()
+
+    # ─────────────────────────────────────────────────────────────────
+    # 5. Make stateful (bind state in → state out as ReadValue/Assign)
+    # ─────────────────────────────────────────────────────────────────
+    print("\n[5/5] Making stateful and saving model...")
+    ov_model = _make_stateful(ov_model, num_full, num_linear)
+    print("  Stateful wiring done.")
+    print(f"  Public inputs  : {[i.any_name for i in ov_model.inputs]}")
+    print(f"  Public outputs : {[o.any_name for o in ov_model.outputs]}")
+
+    xml_path = str(output_dir / "openvino_model.xml")
+    ov.save_model(ov_model, xml_path, compress_to_fp16=True)
+    del ov_model
+    gc.collect()
 
     # File size summary
     bin_path = output_dir / "openvino_model.bin"
