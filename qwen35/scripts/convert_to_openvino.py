@@ -311,15 +311,30 @@ def main() -> int:
         
         # Build inputs dict by matching string names to prevent crashes due to port reordering
         ov_inputs = {}
+        print("\n--- Compile-check Debug Info ---")
+        print("Expected input names order:", input_names)
+        print("Compiled model inputs:")
+        for idx, inp in enumerate(compiled.inputs):
+            print(f"  Compiled Input {idx}: names={inp.get_names()}, any_name={inp.get_any_name()}, shape={inp.get_partial_shape()}, type={inp.get_element_type()}")
+        
         for inp in compiled.inputs:
             name = inp.get_any_name()
             if name in input_names:
                 idx = input_names.index(name)
-                ov_inputs[inp] = example_inputs[idx].numpy()
+                val = example_inputs[idx].numpy()
+                ov_inputs[inp] = val
+                print(f"  Mapped {name} -> array shape={val.shape}, dtype={val.dtype}")
             else:
                 raise ValueError(f"Compiled model has unexpected input: {name}")
 
+        print("Compiled model outputs:")
+        for idx, out in enumerate(compiled.outputs):
+            print(f"  Compiled Output {idx}: names={out.get_names()}, shape={out.get_partial_shape()}, type={out.get_element_type()}")
+
+        print("Invoking compiled model...")
+        sys.stdout.flush()
         ov_result = compiled(ov_inputs)
+        print("Invocation successful!")
 
         # Retrieve logits safely by name
         logits_output = None
