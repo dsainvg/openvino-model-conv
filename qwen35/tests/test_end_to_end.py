@@ -147,6 +147,7 @@ def test_convert_to_openvino_script(dummy_model_dir):
             "--output",    str(out_path),
             "--dtype",     "fp32",
             "--group-size", "4",  # small toy channels need group_size=4
+            "--skip-tokenizer",
         ]
         try:
             from scripts.convert_to_openvino import main as convert_main
@@ -155,7 +156,7 @@ def test_convert_to_openvino_script(dummy_model_dir):
         finally:
             sys.argv = old_argv
 
-        assert (out_path / "embed.xml").exists()
+        assert (out_path / "embed_tokens.xml").exists()
         assert (out_path / "lm_head.xml").exists()
         for i in range(4):
             assert (out_path / f"layer_{i}.xml").exists()

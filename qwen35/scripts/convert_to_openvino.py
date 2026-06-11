@@ -150,6 +150,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"NNCF INT4 group size (default {INT4_GROUP_SIZE}).")
     p.add_argument("--no-int4", action="store_true",
                    help="Skip INT4 quantization; save as FP16 instead.")
+    p.add_argument("--skip-tokenizer", action="store_true",
+                   help="Skip openvino_tokenizers export (use if not installed).")
     p.add_argument("--compile-check", action="store_true",
                    help="Sequentially compile each IR on CPU to verify correctness.")
     return p.parse_args()
@@ -304,7 +306,10 @@ def main() -> int:
 
     # Copy tokenizer / config alongside the IR
     copy_non_weights_files(model_dir, output_dir)
-    export_tokenizer(model_dir, output_dir)
+    if not args.skip_tokenizer:
+        export_tokenizer(model_dir, output_dir)
+    else:
+        print("  Skipping tokenizer export (--skip-tokenizer).")
     write_generation_config(cfg, output_dir)
 
     # Summary
@@ -322,7 +327,7 @@ def main() -> int:
         print("\nCompile-check: loading each IR on CPU sequentially...")
         core = ov.Core()
         print("  embed ...")
-        core.compile_model(str(output_dir / "embed.xml"), "CPU")
+        core.compile_model(str(output_dir / "embed_tokens.xml"), "CPU")
         for i in range(cfg.num_hidden_layers):
             print(f"  layer_{i} ...")
             core.compile_model(str(output_dir / f"layer_{i}.xml"), "CPU")
