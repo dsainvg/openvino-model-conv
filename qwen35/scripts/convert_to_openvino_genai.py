@@ -448,4 +448,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import traceback
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print("\n=== PYTHON CRASH IN CONVERSION SCRIPT ===", flush=True)
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        print("==========================================\n", flush=True)
+        sys.exit(1)
