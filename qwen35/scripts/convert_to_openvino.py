@@ -70,8 +70,8 @@ from src.split_inference import (
 # ─────────────────────────────────────────────────────────────────────────────
 # INT4 compression config
 # ─────────────────────────────────────────────────────────────────────────────
-INT4_MODE       = CompressWeightsMode.INT4_ASYM  # asymmetric = better quality
-INT4_GROUP_SIZE = 64    # 64 is a good balance; use 128 for speed
+INT4_MODE       = CompressWeightsMode.INT4_SYM  # Symmetric mode requested by user
+INT4_GROUP_SIZE = 128   # User requested group size 128
 INT4_RATIO      = 1.0   # compress ALL linear weights to INT4
 
 
@@ -135,7 +135,7 @@ def main() -> int:
     print(f"Model dir   : {model_dir}")
     print(f"Output dir  : {output_dir}")
     print(f"Weight dtype: {args.dtype}")
-    print(f"Quantization: {'INT4_ASYM  group_size=' + str(group_size) if use_int4 else 'FP16 (--no-int4)'}")
+    print(f"Quantization: {'INT4_SYM  group_size=' + str(group_size) if use_int4 else 'FP16 (--no-int4)'}")
 
     cfg        = Qwen35Config.from_pretrained_dir(model_dir)
     weight_map = build_shard_index(model_dir)

@@ -150,6 +150,8 @@ def test_convert_to_openvino_script(dummy_model_dir):
             str(out_path),
             "--dtype",
             "fp32",  # float32 for testing conversion
+            "--group-size",
+            "4",     # Toy model channel sizes are small (16, 32). Group size 4 prevents NNCF divisibility errors.
         ]
         try:
             from scripts.convert_to_openvino import main as convert_main
