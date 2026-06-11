@@ -1,15 +1,20 @@
-"""Convert Qwen3.5-4B to OpenVINO IR in split-IR format (layer-by-layer).
+"""Convert Qwen3.5-4B to OpenVINO INT4 split-IR format (layer-by-layer).
 
-Strategy mirrors qwen36/scripts/convert_toy.py:
-  - Feed each PyTorch wrapper module DIRECTLY to ov.convert_model()
-    (OpenVINO's Torch FX capture) instead of going through torch.onnx.export.
-  - This avoids ALL ONNX exporter version/Dynamo issues.
-  - Layers are converted one at a time to keep RAM low.
+Strategy:
+  1. Feed each PyTorch wrapper directly to ov.convert_model() — no ONNX step.
+  2. Apply NNCF INT4 weight compression (nncf.compress_weights) to every IR.
+  3. Save each IR immediately and free RAM before loading the next layer.
+
+INT4 quantization uses AWQ-style asymmetric per-group quantization:
+  - mode  : INT4_ASYM  (best quality for LLMs)
+  - group_size: 64  (balances quality vs size; 128 is faster but slightly lower quality)
+  - ratio : 1.0  (compress ALL Linear layers to INT4)
+  - Embeddings and norms stay in fp16 (handled by compress_to_fp16 at save time).
 
 Output layout:
-  <output_dir>/embed.xml          -- embedding lookup
-  <output_dir>/layer_N.xml        -- one per decoder layer (full or linear attn)
-  <output_dir>/lm_head.xml        -- final norm + lm_head projection
+  <output_dir>/embed.xml        -- embedding lookup (fp16 weights)
+  <output_dir>/layer_N.xml      -- decoder layers  (INT4 linear weights)
+  <output_dir>/lm_head.xml      -- final norm + lm_head (INT4 projection)
 """
 from __future__ import annotations
 
@@ -29,10 +34,10 @@ try:
     import openvino_telemetry
     def _noop(*a, **kw):
         pass
-    openvino_telemetry.Telemetry.send_event    = _noop
-    openvino_telemetry.Telemetry.start_session = _noop
-    openvino_telemetry.Telemetry.end_session   = _noop
-    openvino_telemetry.Telemetry.send_error    = _noop
+    openvino_telemetry.Telemetry.send_event       = _noop
+    openvino_telemetry.Telemetry.start_session    = _noop
+    openvino_telemetry.Telemetry.end_session      = _noop
+    openvino_telemetry.Telemetry.send_error       = _noop
     openvino_telemetry.Telemetry.send_stack_trace = _noop
     try:
         import openvino_telemetry.utils.sender
@@ -43,6 +48,8 @@ except ImportError:
     pass
 
 import openvino as ov
+import nncf
+from nncf import compress_weights, CompressWeightsMode
 
 from src.configuration import Qwen35Config
 from src.load_weights import (
@@ -60,6 +67,24 @@ from src.split_inference import (
     QwenLMHeadWrapper,
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# INT4 compression config
+# ─────────────────────────────────────────────────────────────────────────────
+INT4_MODE       = CompressWeightsMode.INT4_ASYM  # asymmetric = better quality
+INT4_GROUP_SIZE = 64    # 64 is a good balance; use 128 for speed
+INT4_RATIO      = 1.0   # compress ALL linear weights to INT4
+
+
+def _save_int4(ov_model: ov.Model, xml_path: str) -> None:
+    """Apply NNCF INT4 weight compression and save the IR."""
+    compressed = compress_weights(
+        ov_model,
+        mode=INT4_MODE,
+        group_size=INT4_GROUP_SIZE,
+        ratio=INT4_RATIO,
+    )
+    ov.save_model(compressed, xml_path, compress_to_fp16=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -74,13 +99,19 @@ def copy_non_weights_files(src_dir: Path, dst_dir: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Convert Qwen3.5-4B to split-IR OpenVINO.")
+    p = argparse.ArgumentParser(
+        description="Convert Qwen3.5-4B to INT4 split-IR OpenVINO."
+    )
     p.add_argument("--model-dir", type=Path, required=True,
-                   help="Path to the Hugging Face weights directory.")
+                   help="Path to the HuggingFace weights directory.")
     p.add_argument("--output", type=Path, default=None,
                    help="Output directory for split IR files.")
     p.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16",
-                   help="Dtype to process weights (default bf16).")
+                   help="Dtype for tracing (default bf16).")
+    p.add_argument("--group-size", type=int, default=INT4_GROUP_SIZE,
+                   help=f"NNCF INT4 group size (default {INT4_GROUP_SIZE}).")
+    p.add_argument("--no-int4", action="store_true",
+                   help="Skip INT4 quantization; save as FP16 instead.")
     p.add_argument("--compile-check", action="store_true",
                    help="Sequentially compile each IR on CPU to verify correctness.")
     return p.parse_args()
@@ -93,23 +124,38 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    output_dir = args.output.resolve() if args.output else (REPO.parent / "ov_ir_qwen35_4b")
+    output_dir = args.output.resolve() if args.output else (REPO.parent / "ov_ir_qwen35_4b_int4")
     output_dir.mkdir(parents=True, exist_ok=True)
     model_dir  = args.model_dir.resolve()
 
-    out_dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+    out_dtype  = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+    use_int4   = not args.no_int4
+    group_size = args.group_size
 
     print(f"Model dir   : {model_dir}")
     print(f"Output dir  : {output_dir}")
     print(f"Weight dtype: {args.dtype}")
+    print(f"Quantization: {'INT4_ASYM  group_size=' + str(group_size) if use_int4 else 'FP16 (--no-int4)'}")
 
     cfg        = Qwen35Config.from_pretrained_dir(model_dir)
     weight_map = build_shard_index(model_dir)
 
+    def save_ir(ov_model: ov.Model, xml_path: str) -> None:
+        if use_int4:
+            compressed = compress_weights(
+                ov_model,
+                mode=INT4_MODE,
+                group_size=group_size,
+                ratio=INT4_RATIO,
+            )
+            ov.save_model(compressed, xml_path, compress_to_fp16=True)
+        else:
+            ov.save_model(ov_model, xml_path, compress_to_fp16=True)
+
     # ──────────────────────────────────────────────────────────────
-    # 1. Embedding
+    # 1. Embedding  (kept FP16 — embeddings don't benefit from INT4)
     # ──────────────────────────────────────────────────────────────
-    print("\n[1/3] Converting Embedding...")
+    print("\n[1/3] Converting Embedding (FP16)...")
     shell = QwenForCausalLM(cfg)
 
     embed_key = _find_key(weight_map, "embed_tokens.weight", [
@@ -117,25 +163,24 @@ def main() -> int:
         "language_model.model.embed_tokens.weight",
         "model.embed_tokens.weight",
     ])
-    shell.model.embed_tokens.weight.data.copy_(
+    shell.model.embed_tokens.weight.data = (
         _load_safetensors_weight(weight_map, model_dir, embed_key, out_dtype)
     )
 
-    # Cast the whole wrapper to out_dtype so model params match example inputs.
     embed_wrapper = QwenEmbedWrapper(shell).eval().to(out_dtype)
-    # seq_len > 1 for shape inference: OV captures a richer dynamic shape.
-    example_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
+    example_ids   = torch.tensor([[1, 2, 3]], dtype=torch.long)
 
     ov_embed = ov.convert_model(embed_wrapper, example_input=(example_ids,))
+    # Embedding is always FP16 — INT4 on a lookup table saves nothing
     ov.save_model(ov_embed, str(output_dir / "embed.xml"), compress_to_fp16=True)
     del shell, embed_wrapper, ov_embed
     gc.collect()
-    print("  embed.xml ✓")
+    print("  embed.xml ✓ (fp16)")
 
     # ──────────────────────────────────────────────────────────────
-    # 2. Decoder Layers  (one at a time → low RAM)
+    # 2. Decoder Layers  (INT4 — the big savings are here)
     # ──────────────────────────────────────────────────────────────
-    print(f"\n[2/3] Converting {cfg.num_hidden_layers} decoder layers sequentially...")
+    print(f"\n[2/3] Converting {cfg.num_hidden_layers} decoder layers (INT4)...")
     for i in range(cfg.num_hidden_layers):
         t0 = time.time()
         lt = cfg.layer_types[i]
@@ -145,36 +190,34 @@ def main() -> int:
         load_layer_weights(layer, i, weight_map, model_dir, out_dtype=out_dtype)
 
         if lt == "full_attention":
-            # Cast to out_dtype AFTER loading — _set_param loads into float32 by default.
-            wrapper = QwenLayerFullWrapper(layer).eval().to(out_dtype)
-            x         = torch.randn(1, 1, cfg.hidden_size,          dtype=out_dtype)
-            cos        = torch.randn(1, 1, cfg.partial_rotary_dim,   dtype=out_dtype)
-            sin        = torch.randn(1, 1, cfg.partial_rotary_dim,   dtype=out_dtype)
+            wrapper   = QwenLayerFullWrapper(layer).eval().to(out_dtype)
+            x         = torch.randn(1, 1, cfg.hidden_size,         dtype=out_dtype)
+            cos        = torch.randn(1, 1, cfg.partial_rotary_dim,  dtype=out_dtype)
+            sin        = torch.randn(1, 1, cfg.partial_rotary_dim,  dtype=out_dtype)
             k_cache    = torch.zeros(1, cfg.num_key_value_heads, 8, cfg.head_dim, dtype=out_dtype)
             v_cache    = torch.zeros_like(k_cache)
             write_pos  = torch.tensor(0, dtype=torch.long)
             example_in = (x, cos, sin, k_cache, v_cache, write_pos)
-
         else:  # linear_attention
-            # Cast to out_dtype AFTER loading — _set_param loads into float32 by default.
-            wrapper = QwenLayerLinearWrapper(layer).eval().to(out_dtype)
-            x    = torch.randn(1, 1, cfg.hidden_size,                                           dtype=out_dtype)
-            conv = torch.zeros(1, cfg.linear_conv_dim, cfg.linear_conv_kernel_dim,              dtype=out_dtype)
-            rec  = torch.zeros(1, cfg.linear_num_value_heads,
-                               cfg.linear_key_head_dim, cfg.linear_value_head_dim,              dtype=out_dtype)
+            wrapper   = QwenLayerLinearWrapper(layer).eval().to(out_dtype)
+            x         = torch.randn(1, 1, cfg.hidden_size,                                      dtype=out_dtype)
+            conv      = torch.zeros(1, cfg.linear_conv_dim, cfg.linear_conv_kernel_dim,         dtype=out_dtype)
+            rec       = torch.zeros(1, cfg.linear_num_value_heads,
+                                    cfg.linear_key_head_dim, cfg.linear_value_head_dim,         dtype=out_dtype)
             example_in = (x, conv, rec)
 
         ov_layer = ov.convert_model(wrapper, example_input=example_in)
-        ov.save_model(ov_layer, str(output_dir / f"layer_{i}.xml"), compress_to_fp16=True)
+        save_ir(ov_layer, str(output_dir / f"layer_{i}.xml"))
 
         del layer, wrapper, ov_layer
         gc.collect()
-        print(f"    layer_{i}.xml ✓  ({time.time()-t0:.1f}s)")
+        q_tag = "INT4" if use_int4 else "fp16"
+        print(f"    layer_{i}.xml ✓ ({q_tag}, {time.time()-t0:.1f}s)")
 
     # ──────────────────────────────────────────────────────────────
-    # 3. LM Head + final norm
+    # 3. LM Head + final norm (INT4)
     # ──────────────────────────────────────────────────────────────
-    print("\n[3/3] Converting LM Head + final norm...")
+    print("\n[3/3] Converting LM Head + final norm (INT4)...")
     shell = QwenForCausalLM(cfg)
 
     norm_key = _find_key(weight_map, "norm.weight", [
@@ -182,28 +225,24 @@ def main() -> int:
         "language_model.model.norm.weight",
         "model.norm.weight",
     ])
-    shell.model.norm.weight.data.copy_(
+    shell.model.norm.weight.data = (
         _load_safetensors_weight(weight_map, model_dir, norm_key, out_dtype)
     )
 
-    # Handle tie_word_embeddings=True: lm_head.weight == embed_tokens.weight.
-    # In this case there is NO separate lm_head key in the checkpoint.
-    # Reload the embed weight and assign it to lm_head.
-    lm_head_candidates = [
-        "lm_head.weight",
-        "model.language_model.lm_head.weight",
-        "language_model.lm_head.weight",
-        "lm_head.qweight",
-        "model.language_model.lm_head.qweight",
-        "language_model.lm_head.qweight",
-    ]
+    # Handle tie_word_embeddings=True: no separate lm_head weight in checkpoint
     try:
-        lm_key = _find_key(weight_map, "lm_head.weight", lm_head_candidates)
+        lm_key = _find_key(weight_map, "lm_head.weight", [
+            "lm_head.weight",
+            "model.language_model.lm_head.weight",
+            "language_model.lm_head.weight",
+            "lm_head.qweight",
+            "model.language_model.lm_head.qweight",
+            "language_model.lm_head.qweight",
+        ])
         lm_prefix = lm_key.removesuffix(".qweight").removesuffix(".weight")
         lm_weight = load_linear_weight(weight_map, model_dir, lm_prefix, out_dtype)
     except KeyError:
-        # tie_word_embeddings=True: reuse the embed weight
-        print("  (lm_head.weight not found — using tied embed weight)")
+        print("  (lm_head.weight not in checkpoint — tie_word_embeddings, reusing embed weight)")
         embed_key = _find_key(weight_map, "embed_tokens.weight", [
             "model.language_model.embed_tokens.weight",
             "language_model.model.embed_tokens.weight",
@@ -211,29 +250,33 @@ def main() -> int:
         ])
         lm_weight = _load_safetensors_weight(weight_map, model_dir, embed_key, out_dtype)
 
-    # Resize lm_head if vocab sizes differ (e.g. model was modified)
+    # Resize lm_head if vocab size changed (e.g. 248320 vs default)
     if lm_weight.shape != shell.lm_head.weight.shape:
-        shell.lm_head = torch.nn.Linear(
-            cfg.hidden_size, lm_weight.shape[0], bias=False
-        )
-    shell.lm_head.weight.data.copy_(lm_weight)
+        shell.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False)
+    shell.lm_head.weight.data = lm_weight
 
-    # Cast to out_dtype so model params match example inputs
     lm_wrapper = QwenLMHeadWrapper(shell).eval().to(out_dtype)
     example_x  = torch.randn(1, 3, cfg.hidden_size, dtype=out_dtype)
 
     ov_lm = ov.convert_model(lm_wrapper, example_input=(example_x,))
-    ov.save_model(ov_lm, str(output_dir / "lm_head.xml"), compress_to_fp16=True)
+    save_ir(ov_lm, str(output_dir / "lm_head.xml"))
     del shell, lm_wrapper, ov_lm
     gc.collect()
-    print("  lm_head.xml ✓")
+    print(f"  lm_head.xml ✓ ({'INT4' if use_int4 else 'fp16'})")
 
-    # Copy tokenizer / config files alongside the IR
+    # Copy tokenizer / config alongside the IR
     copy_non_weights_files(model_dir, output_dir)
-    print(f"\n✓ Split-IR conversion complete → {output_dir}")
+
+    # Summary
+    xmls = sorted(output_dir.glob("*.xml"))
+    total_mb = sum((output_dir / x.stem).with_suffix(".bin").stat().st_size
+                   for x in xmls
+                   if (output_dir / x.stem).with_suffix(".bin").exists()) / 1e6
+    print(f"\n✓ INT4 split-IR conversion complete → {output_dir}")
+    print(f"  {len(xmls)} IR files, ~{total_mb:.0f} MB total weights")
 
     # ──────────────────────────────────────────────────────────────
-    # Optional: sequential compile-check (one model at a time)
+    # Optional compile-check
     # ──────────────────────────────────────────────────────────────
     if args.compile_check:
         print("\nCompile-check: loading each IR on CPU sequentially...")
