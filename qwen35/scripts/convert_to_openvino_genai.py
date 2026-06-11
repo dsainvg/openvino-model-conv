@@ -128,10 +128,8 @@ def _load_full_model(
 ) -> QwenForCausalLM:
     """Build the full QwenForCausalLM and load all weights layer-by-layer."""
     print("  Allocating shell model...")
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(out_dtype)
-    model = QwenForCausalLM(cfg)
-    torch.set_default_dtype(old_dtype)
+    with torch.device("meta"):
+        model = QwenForCausalLM(cfg)
 
     # ── Embedding ──────────────────────────────────────────────────────
     embed_key = _find_key(weight_map, "embed_tokens.weight", [
@@ -176,7 +174,7 @@ def _load_full_model(
     if lm_weight.shape != model.lm_head.weight.shape:
         model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False, dtype=out_dtype, device="meta")
     model.lm_head.weight = torch.nn.Parameter(lm_weight)
-    print("  lm_head ✓")
+    print("  lm_head ✓", flush=True)
 
     return model.eval().to(out_dtype)
 
@@ -347,15 +345,15 @@ def main() -> int:
     # ─────────────────────────────────────────────────────────────────
     # 1. Load full model
     # ─────────────────────────────────────────────────────────────────
-    print("\n[1/5] Loading model weights (layer-by-layer to limit RAM)...")
+    print("\n[1/5] Loading model weights (layer-by-layer to limit RAM)...", flush=True)
     t0 = time.time()
     full_model = _load_full_model(cfg, weight_map, model_dir, out_dtype)
-    print(f"  Done ({time.time()-t0:.1f}s)")
+    print(f"  Done ({time.time()-t0:.1f}s)", flush=True)
 
     # ─────────────────────────────────────────────────────────────────
     # 2. Build wrapper + example inputs
     # ─────────────────────────────────────────────────────────────────
-    print("\n[2/5] Building stateful wrapper + example inputs...")
+    print("\n[2/5] Building stateful wrapper + example inputs...", flush=True)
     wrapper = QwenGenAIWrapper(full_model).eval()
 
     num_full   = wrapper.num_full
@@ -372,12 +370,12 @@ def main() -> int:
     )
     print(f"  num_full_layers   = {num_full}")
     print(f"  num_linear_layers = {num_linear}")
-    print(f"  total state tensors = {len(dummy_states)}")
+    print(f"  total state tensors = {len(dummy_states)}", flush=True)
 
     # ─────────────────────────────────────────────────────────────────
     # 3. Trace to OV IR
     # ─────────────────────────────────────────────────────────────────
-    print("\n[3/5] Tracing to OpenVINO IR (this takes a few minutes)...")
+    print("\n[3/5] Tracing to OpenVINO IR (this takes a few minutes)...", flush=True)
     t0 = time.time()
     ov_model = ov.convert_model(wrapper, example_input=example_inputs)
     print(f"  Trace complete ({time.time()-t0:.1f}s)")
