@@ -77,7 +77,6 @@ from src.load_weights import (
     _find_key,
     _load_safetensors_weight,
     load_linear_weight,
-    _set_param,
 )
 from src.modeling import QwenDecoderLayer, QwenForCausalLM
 from src.split_inference import QwenGenAIWrapper
@@ -129,13 +128,7 @@ def _load_full_model(
 ) -> QwenForCausalLM:
     """Build the full QwenForCausalLM and load all weights layer-by-layer."""
     print("  Allocating shell model...")
-    # Set default dtype to prevent PyTorch from allocating 16GB of FP32 parameters initially
-    old_default = torch.get_default_dtype()
-    torch.set_default_dtype(out_dtype)
-    try:
-        model = QwenForCausalLM(cfg)
-    finally:
-        torch.set_default_dtype(old_default)
+    model = QwenForCausalLM(cfg)
 
     # ── Embedding ──────────────────────────────────────────────────────
     embed_key = _find_key(weight_map, "embed_tokens.weight", [
@@ -143,8 +136,7 @@ def _load_full_model(
         "language_model.model.embed_tokens.weight",
         "model.embed_tokens.weight",
     ])
-    _set_param(
-        model.model.embed_tokens, "weight",
+    model.model.embed_tokens.weight.data = (
         _load_safetensors_weight(weight_map, model_dir, embed_key, out_dtype)
     )
     print(f"  embed_tokens ✓")
@@ -161,8 +153,7 @@ def _load_full_model(
         "language_model.model.norm.weight",
         "model.norm.weight",
     ])
-    _set_param(
-        model.model.norm, "weight",
+    model.model.norm.weight.data = (
         _load_safetensors_weight(weight_map, model_dir, norm_key, out_dtype)
     )
 
@@ -177,21 +168,14 @@ def _load_full_model(
         lm_weight  = load_linear_weight(weight_map, model_dir, lm_prefix, out_dtype)
     except KeyError:
         print("  (lm_head not in checkpoint — tie_word_embeddings, reusing embed weight)")
-        lm_weight = model.model.embed_tokens.weight.data
+        lm_weight = model.model.embed_tokens.weight.data.clone()
 
     if lm_weight.shape != model.lm_head.weight.shape:
-        # Re-create lm_head using the target default dtype if shape/vocab size is different
-        old_default = torch.get_default_dtype()
-        torch.set_default_dtype(out_dtype)
-        try:
-            model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False)
-        finally:
-            torch.set_default_dtype(old_default)
-
-    _set_param(model.lm_head, "weight", lm_weight)
+        model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False)
+    model.lm_head.weight.data = lm_weight
     print("  lm_head ✓")
 
-    return model.eval()
+    return model.eval().to(out_dtype)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

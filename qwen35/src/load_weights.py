@@ -56,15 +56,12 @@ from .modeling import (
 
 
 def _set_param(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
-    """Set a parameter or buffer by attribute name without triggering autograd.
-
-    Copies values in-place to the existing parameter to avoid memory allocations.
-    """
+    """Set a parameter or buffer by attribute name without triggering autograd."""
     attr = getattr(module, name)
     with torch.no_grad():
         if tensor.shape != attr.shape:
             raise ValueError(f"shape mismatch for {name}: got {tuple(tensor.shape)}, expected {tuple(attr.shape)}")
-        attr.copy_(tensor)
+        attr.data = tensor
 
 
 def load_plain_tensor(
