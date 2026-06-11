@@ -136,22 +136,17 @@ def dummy_model_dir():
 
 
 def test_convert_to_openvino_script(dummy_model_dir):
-    """Run convert_to_openvino.py on dummy model to ensure it produces IR and matches numerically."""
+    """Run convert_to_openvino.py (split-IR) on dummy model."""
     with tempfile.TemporaryDirectory() as outdir:
         out_path = Path(outdir)
-        
-        # Call the main function directly in-process to avoid Windows subprocess thread pool / DLL initialization crashes (0xC0000005)
+
         old_argv = sys.argv
         sys.argv = [
             "convert_to_openvino.py",
-            "--model-dir",
-            str(dummy_model_dir),
-            "--output",
-            str(out_path),
-            "--dtype",
-            "fp32",  # float32 for testing conversion
-            "--group-size",
-            "4",     # Toy model channel sizes are small (16, 32). Group size 4 prevents NNCF divisibility errors.
+            "--model-dir", str(dummy_model_dir),
+            "--output",    str(out_path),
+            "--dtype",     "fp32",
+            "--group-size", "4",  # small toy channels need group_size=4
         ]
         try:
             from scripts.convert_to_openvino import main as convert_main
@@ -160,8 +155,68 @@ def test_convert_to_openvino_script(dummy_model_dir):
         finally:
             sys.argv = old_argv
 
-        # Verify output files exist
         assert (out_path / "embed.xml").exists()
         assert (out_path / "lm_head.xml").exists()
         for i in range(4):
             assert (out_path / f"layer_{i}.xml").exists()
+
+
+def test_convert_to_openvino_genai_script(dummy_model_dir):
+    """Run convert_to_openvino_genai.py (single stateful model) on dummy model.
+
+    Verifies:
+    - openvino_model.xml is produced.
+    - The model has exactly 4 public inputs:
+        input_ids, attention_mask, position_ids, beam_idx.
+    - The model has exactly 1 public output: logits.
+    - generation_config.json is written.
+    """
+    with tempfile.TemporaryDirectory() as outdir:
+        out_path = Path(outdir)
+
+        old_argv = sys.argv
+        sys.argv = [
+            "convert_to_openvino_genai.py",
+            "--model-dir",       str(dummy_model_dir),
+            "--output",          str(out_path),
+            "--dtype",           "fp32",
+            "--max-seq",         "32",    # tiny for speed
+            "--group-size",      "4",     # small toy channels
+            "--skip-tokenizer",           # no HF model on CI
+        ]
+        try:
+            from scripts.convert_to_openvino_genai import main as genai_main
+            ret = genai_main()
+            assert ret == 0, f"Script main returned {ret}"
+        finally:
+            sys.argv = old_argv
+
+        # ── Verify model file exists ───────────────────────────────────
+        model_xml = out_path / "openvino_model.xml"
+        assert model_xml.exists(), "openvino_model.xml not produced"
+
+        # ── Verify generation_config.json ─────────────────────────────
+        gen_cfg_path = out_path / "generation_config.json"
+        assert gen_cfg_path.exists(), "generation_config.json not produced"
+
+        # ── Load the OV model and verify public I/O ───────────────────
+        import openvino as ov
+        core  = ov.Core()
+        model = core.read_model(str(model_xml))
+
+        input_names  = {i.any_name for i in model.inputs}
+        output_names = {o.any_name for o in model.outputs}
+
+        # Stateful model must have exactly these 4 public inputs
+        for required in ("input_ids", "attention_mask", "position_ids", "beam_idx"):
+            assert required in input_names, (
+                f"Missing required input '{required}'. Got: {input_names}"
+            )
+
+        # Stateful model must have exactly logits as the public output
+        assert len(model.outputs) == 1, (
+            f"Expected 1 output (logits), got {len(model.outputs)}: {output_names}"
+        )
+        assert "logits" in output_names, (
+            f"Expected output named 'logits', got: {output_names}"
+        )
