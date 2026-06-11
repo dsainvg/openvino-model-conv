@@ -245,14 +245,16 @@ def _make_stateful(
     STATE_OUTPUT_OFFSET = 1
 
     n_states = 2 * num_full + 2 * num_linear
-    tensor_names = {}
+    pairs = []
     for k in range(n_states):
         inp_port = inputs[STATE_INPUT_OFFSET + k]
         out_port = outputs[STATE_OUTPUT_OFFSET + k]
-        tensor_names[inp_port.any_name] = out_port.any_name
+        param_node  = inp_port.get_node()
+        result_node = out_port.get_node()
+        pairs.append((param_node, result_node))
 
     manager = Manager()
-    manager.register_pass(MakeStateful(tensor_names))
+    manager.register_pass(MakeStateful(pairs))
     manager.run_passes(ov_model)
 
     # Explicitly set names for the remaining public inputs and outputs
