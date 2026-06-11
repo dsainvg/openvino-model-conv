@@ -1,6 +1,6 @@
-"""Split inference wrappers and state definitions for Qwen3.5-4B.
+"""Explicit split inference wrappers for Qwen3.5-4B.
 
-Enables layer-by-layer OpenVINO conversion and low-memory execution.
+Uses explicit signatures instead of *args to ensure compatibility with Dynamo ONNX exporter.
 """
 from __future__ import annotations
 
@@ -21,29 +21,39 @@ class QwenEmbedWrapper(nn.Module):
         return self.embed(input_ids)
 
 
-class QwenLayerWrapper(nn.Module):
-    """Wraps a single QwenDecoderLayer to support flat arguments mapping."""
+class QwenLayerFullWrapper(nn.Module):
+    """Wraps a full_attention layer with explicit arguments."""
 
     def __init__(self, layer: QwenDecoderLayer):
         super().__init__()
         self.layer = layer
-        self.layer_type = layer.layer_type
 
-    def forward(self, *args: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        if self.layer_type == "full_attention":
-            # args: x, cos, sin, k_cache, v_cache, write_pos
-            x, cos, sin, k_cache, v_cache, write_pos = args
-            x_out, k_out, v_out = self.layer.forward_full(
-                x, cos, sin, k_cache, v_cache, write_pos
-            )
-            return x_out, k_out, v_out
-        else:
-            # args: x, conv_state, recurrent_state
-            x, conv_state, recurrent_state = args
-            x_out, conv_out, rec_out = self.layer.forward_linear(
-                x, conv_state, recurrent_state
-            )
-            return x_out, conv_out, rec_out
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        write_pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.layer.forward_full(x, cos, sin, k_cache, v_cache, write_pos)
+
+
+class QwenLayerLinearWrapper(nn.Module):
+    """Wraps a linear_attention layer with explicit arguments."""
+
+    def __init__(self, layer: QwenDecoderLayer):
+        super().__init__()
+        self.layer = layer
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        conv_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.layer.forward_linear(x, conv_state, recurrent_state)
 
 
 class QwenLMHeadWrapper(nn.Module):
