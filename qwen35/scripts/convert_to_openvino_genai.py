@@ -128,7 +128,10 @@ def _load_full_model(
 ) -> QwenForCausalLM:
     """Build the full QwenForCausalLM and load all weights layer-by-layer."""
     print("  Allocating shell model...")
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(out_dtype)
     model = QwenForCausalLM(cfg)
+    torch.set_default_dtype(old_dtype)
 
     # ── Embedding ──────────────────────────────────────────────────────
     embed_key = _find_key(weight_map, "embed_tokens.weight", [
@@ -167,8 +170,8 @@ def _load_full_model(
         lm_prefix = lm_key.removesuffix(".weight")
         lm_weight  = load_linear_weight(weight_map, model_dir, lm_prefix, out_dtype)
     except KeyError:
-        print("  (lm_head not in checkpoint — tie_word_embeddings, reusing embed weight)")
-        lm_weight = model.model.embed_tokens.weight.data.clone()
+        print("  (lm_head not in checkpoint — tie_word_embeddings, reusing embed weight)", flush=True)
+        lm_weight = model.model.embed_tokens.weight.data
 
     if lm_weight.shape != model.lm_head.weight.shape:
         model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False)
