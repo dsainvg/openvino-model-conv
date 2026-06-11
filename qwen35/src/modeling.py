@@ -258,10 +258,11 @@ class QwenGatedDeltaNet(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch, seq, _ = hidden_states.shape
 
-        mixed_qkv = self.in_proj_qkv(hidden_states).squeeze(1)  # (B, conv_dim)
+        mixed_qkv = self.in_proj_qkv(hidden_states).view(batch, -1)  # (B, conv_dim)
         z   = self.in_proj_z(hidden_states).reshape(batch, self.num_v_heads, self.head_v_dim)
-        b   = self.in_proj_b(hidden_states).squeeze(1)
-        a   = self.in_proj_a(hidden_states).squeeze(1)
+        b   = self.in_proj_b(hidden_states).view(batch, -1)
+        a   = self.in_proj_a(hidden_states).view(batch, -1)
+
 
         # Causal conv1d step: shift state left, append new token projection
         conv_state_out = torch.cat([conv_state_in[:, :, 1:], mixed_qkv.unsqueeze(-1)], dim=-1)

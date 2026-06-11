@@ -26,6 +26,22 @@ from torch import nn
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+# Programmatically disable OpenVINO telemetry to avoid Windows/Python 3.13 thread-safety crashes in ssl/socket
+try:
+    import openvino_telemetry
+    def dummy_method(*args, **kwargs):
+        pass
+    openvino_telemetry.Telemetry.send_event = dummy_method
+    openvino_telemetry.Telemetry.start_session = dummy_method
+    openvino_telemetry.Telemetry.end_session = dummy_method
+    openvino_telemetry.Telemetry.send_error = dummy_method
+    openvino_telemetry.Telemetry.send_stack_trace = dummy_method
+    
+    import openvino_telemetry.utils.sender
+    openvino_telemetry.utils.sender.TelemetrySender.send = dummy_method
+except ImportError:
+    pass
+
 import openvino as ov
 
 from src.configuration import Qwen35Config
@@ -87,6 +103,7 @@ class FlatWrapper(nn.Module):
         exec(code, globals(), locs)
         import types
         self.forward = types.MethodType(locs["forward"], self)
+
 
 
 def build_example_inputs(model: QwenForCausalLM, max_seq: int = 8):
@@ -184,12 +201,53 @@ def main() -> int:
     print(f"  logits shape : {tuple(ref_logits.shape)}")
     print(f"  logits finite: {torch.isfinite(ref_logits).all().item()}")
 
-    # 5. ov.convert_model
-    print("\nov.convert_model ...")
-    t0       = time.time()
+    # 5. ov.convert_model directly (no intermediate ONNX export needed, bypasses JIT bugs)
+    print("\nConverting model directly to OpenVINO ...")
+    t0 = time.time()
     ov_model = ov.convert_model(wrapper, example_input=example_inputs)
+
+    # Define input and output names in order
+    input_names = ["input_ids", "position_ids"]
+    for i in range(wrapper.n_full):
+        input_names.append(f"k_cache_{i}")
+    for i in range(wrapper.n_full):
+        input_names.append(f"v_cache_{i}")
+    for i in range(wrapper.n_lin):
+        input_names.append(f"conv_state_{i}")
+    for i in range(wrapper.n_lin):
+        input_names.append(f"rec_state_{i}")
+
+    output_names = ["logits"]
+    for i in range(wrapper.n_full):
+        output_names.append(f"k_cache_out_{i}")
+    for i in range(wrapper.n_full):
+        output_names.append(f"v_cache_out_{i}")
+    for i in range(wrapper.n_lin):
+        output_names.append(f"conv_state_out_{i}")
+    for i in range(wrapper.n_lin):
+        output_names.append(f"rec_state_out_{i}")
+
+    # Set input and output names by index
+    for idx, name in enumerate(input_names):
+        ov_model.inputs[idx].set_names({name})
+    for idx, name in enumerate(output_names):
+        ov_model.outputs[idx].set_names({name})
+
+    # Reshape to dynamic shapes
+    print("  Applying dynamic shapes ...")
+    dynamic_shapes = {}
+    dynamic_shapes["input_ids"] = ov.PartialShape([-1, -1])
+    dynamic_shapes["position_ids"] = ov.PartialShape([-1, -1])
+    for i in range(wrapper.n_full):
+        dynamic_shapes[f"k_cache_{i}"] = ov.PartialShape([-1, cfg.num_key_value_heads, -1, cfg.head_dim])
+        dynamic_shapes[f"v_cache_{i}"] = ov.PartialShape([-1, cfg.num_key_value_heads, -1, cfg.head_dim])
+    for i in range(wrapper.n_lin):
+        dynamic_shapes[f"conv_state_{i}"] = ov.PartialShape([-1, cfg.linear_conv_dim, cfg.linear_conv_kernel_dim])
+        dynamic_shapes[f"rec_state_{i}"] = ov.PartialShape([-1, cfg.linear_num_value_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim])
+
+    ov_model.reshape(dynamic_shapes)
     print(f"  OK ({time.time()-t0:.1f}s)")
-    ov_model.outputs[0].set_names({"logits"})
+
 
 
     # 6. Save IR
@@ -211,8 +269,9 @@ def main() -> int:
         print(f"  available devices: {core.available_devices}")
         compiled = core.compile_model(str(ir_xml), "CPU")
         print(f"  compiled — {len(compiled.inputs)} inputs / {len(compiled.outputs)} outputs")
-        ov_result = compiled([t.numpy() for t in example_inputs])
-        ov_logits = torch.from_numpy(ov_result[0])
+        ov_inputs = {compiled.inputs[i]: example_inputs[i].numpy() for i in range(len(compiled.inputs))}
+        ov_result = compiled(ov_inputs)
+        ov_logits = torch.from_numpy(ov_result[compiled.outputs[0]])
         diff      = (ref_logits.float() - ov_logits.float()).abs()
         pt_next   = ref_logits[0, -1].float().argmax().item()
         ov_next   = ov_logits[0, -1].float().argmax().item()

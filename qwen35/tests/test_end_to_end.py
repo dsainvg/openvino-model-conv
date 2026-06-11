@@ -17,6 +17,22 @@ from safetensors.torch import save_file
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+# Programmatically disable OpenVINO telemetry to avoid Windows/Python 3.13 thread-safety crashes in ssl/socket
+try:
+    import openvino_telemetry
+    def dummy_method(*args, **kwargs):
+        pass
+    openvino_telemetry.Telemetry.send_event = dummy_method
+    openvino_telemetry.Telemetry.start_session = dummy_method
+    openvino_telemetry.Telemetry.end_session = dummy_method
+    openvino_telemetry.Telemetry.send_error = dummy_method
+    openvino_telemetry.Telemetry.send_stack_trace = dummy_method
+    
+    import openvino_telemetry.utils.sender
+    openvino_telemetry.utils.sender.TelemetrySender.send = dummy_method
+except ImportError:
+    pass
+
 from src.configuration import make_toy_config
 
 
@@ -112,11 +128,11 @@ def test_convert_to_openvino_script(dummy_model_dir):
     """Run convert_to_openvino.py on dummy model to ensure it produces IR and matches numerically."""
     with tempfile.TemporaryDirectory() as outdir:
         out_path = Path(outdir)
-        script_path = REPO_ROOT / "scripts" / "convert_to_openvino.py"
-
-        cmd = [
-            sys.executable,
-            str(script_path),
+        
+        # Call the main function directly in-process to avoid Windows subprocess thread pool / DLL initialization crashes (0xC0000005)
+        old_argv = sys.argv
+        sys.argv = [
+            "convert_to_openvino.py",
             "--model-dir",
             str(dummy_model_dir),
             "--output",
@@ -125,11 +141,12 @@ def test_convert_to_openvino_script(dummy_model_dir):
             "fp32",  # float32 for testing conversion and compile check
             "--compile-check",
         ]
-
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        print("STDOUT:", res.stdout)
-        print("STDERR:", res.stderr)
-        assert res.returncode == 0, f"Script failed with exit code {res.returncode}"
+        try:
+            from scripts.convert_to_openvino import main as convert_main
+            ret = convert_main()
+            assert ret == 0, f"Script main returned {ret}"
+        finally:
+            sys.argv = old_argv
 
         # Verify output files exist
         assert (out_path / "openvino_model.xml").exists()
