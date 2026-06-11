@@ -61,7 +61,10 @@ def _set_param(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
     with torch.no_grad():
         if tensor.shape != attr.shape:
             raise ValueError(f"shape mismatch for {name}: got {tuple(tensor.shape)}, expected {tuple(attr.shape)}")
-        attr.data = tensor
+        if isinstance(attr, nn.Parameter):
+            setattr(module, name, nn.Parameter(tensor, requires_grad=attr.requires_grad))
+        else:
+            setattr(module, name, tensor)
 
 
 def load_plain_tensor(

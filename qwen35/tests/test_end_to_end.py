@@ -220,3 +220,4 @@ def test_convert_to_openvino_genai_script(dummy_model_dir):
         assert "logits" in output_names, (
             f"Expected output named 'logits', got: {output_names}"
         )
+        del model

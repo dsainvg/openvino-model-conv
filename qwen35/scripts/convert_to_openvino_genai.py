@@ -137,7 +137,7 @@ def _load_full_model(
         "language_model.model.embed_tokens.weight",
         "model.embed_tokens.weight",
     ])
-    model.model.embed_tokens.weight.data = (
+    model.model.embed_tokens.weight = torch.nn.Parameter(
         _load_safetensors_weight(weight_map, model_dir, embed_key, out_dtype)
     )
     print(f"  embed_tokens ✓")
@@ -154,7 +154,7 @@ def _load_full_model(
         "language_model.model.norm.weight",
         "model.norm.weight",
     ])
-    model.model.norm.weight.data = (
+    model.model.norm.weight = torch.nn.Parameter(
         _load_safetensors_weight(weight_map, model_dir, norm_key, out_dtype)
     )
 
