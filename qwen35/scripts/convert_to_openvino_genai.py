@@ -396,21 +396,48 @@ def main() -> int:
     # 5a. INT4 compression
     # ─────────────────────────────────────────────────────────────────
     print("\n[5/5] Saving model...")
-    if use_int4:
-        print(f"  Applying NNCF INT4_SYM (group_size={group_size})...")
-        t0 = time.time()
-        ov_model = compress_weights(
-            ov_model,
-            mode=CompressWeightsMode.INT4_SYM,
-            group_size=group_size,
-            ratio=1.0,
-        )
-        print(f"  INT4 compression done ({time.time()-t0:.1f}s)")
-
     xml_path = str(output_dir / "openvino_model.xml")
-    ov.save_model(ov_model, xml_path, compress_to_fp16=True)
-    del ov_model
-    gc.collect()
+
+    if use_int4:
+        print(f"  Applying NNCF INT4_SYM (group_size={group_size}) in a subprocess to avoid OOM...")
+        t0 = time.time()
+        
+        # Save temporary FP16 model first
+        temp_xml = output_dir / "temp_fp16.xml"
+        ov.save_model(ov_model, str(temp_xml), compress_to_fp16=True)
+        
+        # Free memory in current process immediately
+        del ov_model
+        gc.collect()
+        
+        # Run compression in a fresh subprocess to release all PyTorch and tracing RAM
+        import subprocess
+        cmd = [
+            sys.executable, "-c",
+            f"import openvino as ov, nncf; "
+            f"from nncf import compress_weights, CompressWeightsMode; "
+            f"core = ov.Core(); "
+            f"model = core.read_model(r'{temp_xml}'); "
+            f"compressed = compress_weights(model, mode=CompressWeightsMode.INT4_SYM, group_size={group_size}, ratio=1.0); "
+            f"ov.save_model(compressed, r'{xml_path}', compress_to_fp16=True)"
+        ]
+        
+        res = subprocess.run(cmd)
+        if res.returncode != 0:
+            raise RuntimeError(f"NNCF compression failed with code {res.returncode}")
+            
+        print(f"  INT4 compression done ({time.time()-t0:.1f}s)")
+        
+        # Clean up temporary files
+        try:
+            temp_xml.unlink()
+            (output_dir / "temp_fp16.bin").unlink()
+        except Exception:
+            pass
+    else:
+        ov.save_model(ov_model, xml_path, compress_to_fp16=True)
+        del ov_model
+        gc.collect()
 
     # File size summary
     bin_path = output_dir / "openvino_model.bin"
