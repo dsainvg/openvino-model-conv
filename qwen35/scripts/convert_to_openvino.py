@@ -121,7 +121,8 @@ def main() -> int:
         _load_safetensors_weight(weight_map, model_dir, embed_key, out_dtype)
     )
 
-    embed_wrapper = QwenEmbedWrapper(shell).eval()
+    # Cast the whole wrapper to out_dtype so model params match example inputs.
+    embed_wrapper = QwenEmbedWrapper(shell).eval().to(out_dtype)
     # seq_len > 1 for shape inference: OV captures a richer dynamic shape.
     example_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
 
@@ -144,21 +145,23 @@ def main() -> int:
         load_layer_weights(layer, i, weight_map, model_dir, out_dtype=out_dtype)
 
         if lt == "full_attention":
-            wrapper = QwenLayerFullWrapper(layer).eval()
-            x         = torch.randn(1, 1, cfg.hidden_size,                                      dtype=out_dtype)
-            cos        = torch.randn(1, 1, cfg.partial_rotary_dim,                               dtype=out_dtype)
-            sin        = torch.randn(1, 1, cfg.partial_rotary_dim,                               dtype=out_dtype)
-            k_cache    = torch.zeros(1, cfg.num_key_value_heads, 8, cfg.head_dim,               dtype=out_dtype)
+            # Cast to out_dtype AFTER loading — _set_param loads into float32 by default.
+            wrapper = QwenLayerFullWrapper(layer).eval().to(out_dtype)
+            x         = torch.randn(1, 1, cfg.hidden_size,          dtype=out_dtype)
+            cos        = torch.randn(1, 1, cfg.partial_rotary_dim,   dtype=out_dtype)
+            sin        = torch.randn(1, 1, cfg.partial_rotary_dim,   dtype=out_dtype)
+            k_cache    = torch.zeros(1, cfg.num_key_value_heads, 8, cfg.head_dim, dtype=out_dtype)
             v_cache    = torch.zeros_like(k_cache)
             write_pos  = torch.tensor(0, dtype=torch.long)
             example_in = (x, cos, sin, k_cache, v_cache, write_pos)
 
         else:  # linear_attention
-            wrapper = QwenLayerLinearWrapper(layer).eval()
-            x         = torch.randn(1, 1, cfg.hidden_size,                                                   dtype=out_dtype)
-            conv       = torch.zeros(1, cfg.linear_conv_dim, cfg.linear_conv_kernel_dim,                     dtype=out_dtype)
-            rec        = torch.zeros(1, cfg.linear_num_value_heads,
-                                     cfg.linear_key_head_dim, cfg.linear_value_head_dim,                     dtype=out_dtype)
+            # Cast to out_dtype AFTER loading — _set_param loads into float32 by default.
+            wrapper = QwenLayerLinearWrapper(layer).eval().to(out_dtype)
+            x    = torch.randn(1, 1, cfg.hidden_size,                                           dtype=out_dtype)
+            conv = torch.zeros(1, cfg.linear_conv_dim, cfg.linear_conv_kernel_dim,              dtype=out_dtype)
+            rec  = torch.zeros(1, cfg.linear_num_value_heads,
+                               cfg.linear_key_head_dim, cfg.linear_value_head_dim,              dtype=out_dtype)
             example_in = (x, conv, rec)
 
         ov_layer = ov.convert_model(wrapper, example_input=example_in)
@@ -179,32 +182,44 @@ def main() -> int:
         "language_model.model.norm.weight",
         "model.norm.weight",
     ])
-    try:
-        lm_key = _find_key(weight_map, "lm_head.weight", [
-            "lm_head.weight",
-            "model.language_model.lm_head.weight",
-            "language_model.lm_head.weight",
-            "lm_head.qweight",
-            "model.language_model.lm_head.qweight",
-            "language_model.lm_head.qweight",
-        ])
-    except KeyError:
-        lm_key = _find_key(weight_map, "lm_head.qweight", [
-            "lm_head.qweight",
-            "model.language_model.lm_head.qweight",
-            "language_model.lm_head.qweight",
-        ])
-
     shell.model.norm.weight.data.copy_(
         _load_safetensors_weight(weight_map, model_dir, norm_key, out_dtype)
     )
 
-    lm_prefix = lm_key.removesuffix(".qweight").removesuffix(".weight")
-    shell.lm_head.weight.data.copy_(
-        load_linear_weight(weight_map, model_dir, lm_prefix, out_dtype)
-    )
+    # Handle tie_word_embeddings=True: lm_head.weight == embed_tokens.weight.
+    # In this case there is NO separate lm_head key in the checkpoint.
+    # Reload the embed weight and assign it to lm_head.
+    lm_head_candidates = [
+        "lm_head.weight",
+        "model.language_model.lm_head.weight",
+        "language_model.lm_head.weight",
+        "lm_head.qweight",
+        "model.language_model.lm_head.qweight",
+        "language_model.lm_head.qweight",
+    ]
+    try:
+        lm_key = _find_key(weight_map, "lm_head.weight", lm_head_candidates)
+        lm_prefix = lm_key.removesuffix(".qweight").removesuffix(".weight")
+        lm_weight = load_linear_weight(weight_map, model_dir, lm_prefix, out_dtype)
+    except KeyError:
+        # tie_word_embeddings=True: reuse the embed weight
+        print("  (lm_head.weight not found — using tied embed weight)")
+        embed_key = _find_key(weight_map, "embed_tokens.weight", [
+            "model.language_model.embed_tokens.weight",
+            "language_model.model.embed_tokens.weight",
+            "model.embed_tokens.weight",
+        ])
+        lm_weight = _load_safetensors_weight(weight_map, model_dir, embed_key, out_dtype)
 
-    lm_wrapper = QwenLMHeadWrapper(shell).eval()
+    # Resize lm_head if vocab sizes differ (e.g. model was modified)
+    if lm_weight.shape != shell.lm_head.weight.shape:
+        shell.lm_head = torch.nn.Linear(
+            cfg.hidden_size, lm_weight.shape[0], bias=False
+        )
+    shell.lm_head.weight.data.copy_(lm_weight)
+
+    # Cast to out_dtype so model params match example inputs
+    lm_wrapper = QwenLMHeadWrapper(shell).eval().to(out_dtype)
     example_x  = torch.randn(1, 3, cfg.hidden_size, dtype=out_dtype)
 
     ov_lm = ov.convert_model(lm_wrapper, example_input=(example_x,))

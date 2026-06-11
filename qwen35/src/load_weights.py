@@ -56,12 +56,18 @@ from .modeling import (
 
 
 def _set_param(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
-    """Set a parameter or buffer by attribute name without trigger autograd."""
+    """Set a parameter or buffer by attribute name without triggering autograd.
+
+    The tensor is stored in its own dtype (as loaded from disk).
+    We do NOT force attr.dtype so that bf16 weights stay bf16.
+    The wrapper is cast to out_dtype wholesale after all weights are loaded.
+    """
     attr = getattr(module, name)
     with torch.no_grad():
         if tensor.shape != attr.shape:
             raise ValueError(f"shape mismatch for {name}: got {tuple(tensor.shape)}, expected {tuple(attr.shape)}")
-        attr.data.copy_(tensor.to(attr.dtype))
+        # Resize the underlying storage to the incoming dtype then copy
+        attr.data = tensor.clone()
 
 
 def load_plain_tensor(
