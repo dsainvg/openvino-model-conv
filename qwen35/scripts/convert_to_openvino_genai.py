@@ -174,8 +174,8 @@ def _load_full_model(
         lm_weight = model.model.embed_tokens.weight.data
 
     if lm_weight.shape != model.lm_head.weight.shape:
-        model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False)
-    model.lm_head.weight.data = lm_weight
+        model.lm_head = torch.nn.Linear(cfg.hidden_size, lm_weight.shape[0], bias=False, dtype=out_dtype, device="meta")
+    model.lm_head.weight = torch.nn.Parameter(lm_weight)
     print("  lm_head ✓")
 
     return model.eval().to(out_dtype)
