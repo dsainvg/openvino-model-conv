@@ -115,14 +115,14 @@ print(pipe.generate("Hello, my name is", max_new_tokens=64))
         upload_dir = Path(temp_dir)
         print(f"\n[1/2] Creating clean upload directory at {upload_dir} ...")
 
-        # Copy only required files (exclude split IR layers, embedding, and lm_head)
+        # Copy only required files (exclude split IR layers, embedding, lm_head, and safetensors metadata index)
         exclude_prefixes = ("layer_", "embed_tokens", "lm_head")
         
         copied_count = 0
         for item in ir_dir.iterdir():
             if item.is_file():
-                if item.name.startswith(exclude_prefixes):
-                    print(f"  Ignoring split-IR file: {item.name}")
+                if item.name.startswith(exclude_prefixes) or "safetensors" in item.name:
+                    print(f"  Ignoring file: {item.name}")
                     continue
                 shutil.copy2(item, upload_dir / item.name)
                 print(f"  Copying: {item.name}")
