@@ -145,8 +145,8 @@ def parse_args() -> argparse.Namespace:
                    help="Path to the HuggingFace weights directory.")
     p.add_argument("--output", type=Path, default=None,
                    help="Output directory for split IR files.")
-    p.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16",
-                   help="Dtype for tracing (default bf16).")
+    p.add_argument("--dtype", choices=("fp16", "fp32"), default="fp16",
+                   help="Dtype for tracing (default fp16).")
     p.add_argument("--group-size", type=int, default=INT4_GROUP_SIZE,
                    help=f"NNCF INT4 group size (default {INT4_GROUP_SIZE}).")
     p.add_argument("--no-int4", action="store_true",
@@ -169,7 +169,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_dir  = args.model_dir.resolve()
 
-    out_dtype  = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+    out_dtype  = torch.float16 if args.dtype == "fp16" else torch.float32
     use_int4   = not args.no_int4
     group_size = args.group_size
 

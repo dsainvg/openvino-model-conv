@@ -105,8 +105,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-seq", type=int, default=2048,
                    help="Static KV-cache length baked into the model (NPU requires static). "
                         "Default: 2048. Use 4096 for longer context (more VRAM).")
-    p.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16",
-                   help="Weight dtype for tracing (default bf16).")
+    p.add_argument("--dtype", choices=("fp16", "fp32"), default="fp16",
+                   help="Weight dtype for tracing (default fp16).")
     p.add_argument("--group-size", type=int, default=128,
                    help="NNCF INT4 group size (default 128).")
     p.add_argument("--no-int4", action="store_true",
@@ -328,7 +328,7 @@ def main() -> int:
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    out_dtype  = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+    out_dtype  = torch.float16 if args.dtype == "fp16" else torch.float32
     use_int4   = not args.no_int4
     max_seq    = args.max_seq
     group_size = args.group_size
