@@ -80,27 +80,23 @@ tags:
 license: apache-2.0
 ---
 
-# Qwen3.5-4B — OpenVINO IR (FP16)
+# Qwen3.5-4B — OpenVINO IR (Stateful NPU-Ready)
 
-OpenVINO intermediate-representation export of [{args.base_model}](https://huggingface.co/{args.base_model}).
+OpenVINO stateful intermediate-representation export of [{args.base_model}](https://huggingface.co/{args.base_model}).
 
 Converted on {date.today()} with [`dsainvg/openvino-model-conv`](https://github.com/dsainvg/openvino-model-conv)
-via `qwen35/scripts/convert_to_openvino.py` — pure `ov.convert_model` on the PyTorch model
-(no optimum-intel exporter).
+via `qwen35/scripts/convert_to_openvino.py` — stateful single-model tracing.
 
-## Load with OpenVINO
+## Load with OpenVINO GenAI
+
+This model is NPU-compatible and ready to load using `openvino_genai`:
 
 ```python
-import openvino as ov
-import numpy as np
-from transformers import AutoTokenizer
+import openvino_genai as ov_genai
 
-core     = ov.Core()
-compiled = core.compile_model("openvino_model.xml", "CPU")
-tok      = AutoTokenizer.from_pretrained("{full_id}")
-
-inputs    = tok("Hello, world!", return_tensors="np")
-# Build state tensors (zeros) matching your max_seq budget, then call compiled(...)
+# Load model (automatically downloads from HuggingFace on first run)
+pipe = ov_genai.LLMPipeline("{full_id}", "CPU") # or "NPU"
+print(pipe.generate("Hello, my name is", max_new_tokens=64))
 ```
 
 ## Files
@@ -108,23 +104,49 @@ inputs    = tok("Hello, world!", return_tensors="np")
 | File | Description |
 |------|-------------|
 | `openvino_model.xml` / `.bin` | OpenVINO IR (FP16 weights) |
-| `tokenizer.json`, `tokenizer_config.json` | Tokeniser assets |
+| `openvino_tokenizer.xml` / `.bin` | Tokenizer |
+| `openvino_detokenizer.xml` / `.bin` | Detokenizer |
 | `config.json`, `generation_config.json` | Model config |
 """
-    (ir_dir / "README.md").write_text(readme, encoding="utf-8")
-    print("Model card written.")
+    import tempfile
+    import shutil
 
-    print(f"\nUploading {ir_dir} → {full_id} ...")
-    upload_folder(
-        folder_path     = str(ir_dir),
-        repo_id         = full_id,
-        repo_type       = "model",
-        commit_message  = "Add Qwen3.5-4B OpenVINO FP16 IR (ov.convert_model)",
-        ignore_patterns = ["__pycache__", "*.pyc"],
-        token           = token,
-    )
+    with tempfile.TemporaryDirectory(prefix="hf_upload_") as temp_dir:
+        upload_dir = Path(temp_dir)
+        print(f"\n[1/2] Creating clean upload directory at {upload_dir} ...")
 
-    print(f"\n✓ Done! → https://huggingface.co/{full_id}")
+        # Copy only required files (exclude split IR layers, embedding, and lm_head)
+        exclude_prefixes = ("layer_", "embed_tokens", "lm_head")
+        
+        copied_count = 0
+        for item in ir_dir.iterdir():
+            if item.is_file():
+                if item.name.startswith(exclude_prefixes):
+                    print(f"  Ignoring split-IR file: {item.name}")
+                    continue
+                shutil.copy2(item, upload_dir / item.name)
+                print(f"  Copying: {item.name}")
+                copied_count += 1
+
+        if copied_count == 0:
+            print("ERROR: No files copied to clean upload directory.", file=sys.stderr)
+            return 1
+
+        # Write model card to the clean upload directory
+        (upload_dir / "README.md").write_text(readme, encoding="utf-8")
+        print("Model card written.")
+
+        print(f"\n[2/2] Uploading {upload_dir} → {full_id} ...")
+        upload_folder(
+            folder_path     = str(upload_dir),
+            repo_id         = full_id,
+            repo_type       = "model",
+            commit_message  = "Add Qwen3.5-4B OpenVINO FP16 IR (stateful single-model)",
+            ignore_patterns = ["__pycache__", "*.pyc"],
+            token           = token,
+        )
+
+    print(f"\n✓ Done! Clean upload complete → https://huggingface.co/{full_id}")
     return 0
 
 
