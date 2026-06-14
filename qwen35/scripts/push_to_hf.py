@@ -80,22 +80,19 @@ tags:
 license: apache-2.0
 ---
 
-# Qwen3.5-4B — OpenVINO IR (Stateful NPU-Ready)
+# Qwen3.5-4B — OpenVINO IR (Split-IR Layer-Wise)
 
-OpenVINO stateful intermediate-representation export of [{args.base_model}](https://huggingface.co/{args.base_model}).
+OpenVINO split-IR layer-wise intermediate-representation export of [{args.base_model}](https://huggingface.co/{args.base_model}).
 
 Converted on {date.today()} with [`dsainvg/openvino-model-conv`](https://github.com/dsainvg/openvino-model-conv)
-via `qwen35/scripts/convert_to_openvino.py` — stateful single-model tracing.
+via `qwen35/scripts/convert_to_openvino.py` — layer-by-layer conversion.
 
-## Load with OpenVINO GenAI
-
-This model is NPU-compatible and ready to load using `openvino_genai`:
+## Load with QwenPipeline
 
 ```python
-import openvino_genai as ov_genai
+from qwen_npu_pipeline import QwenPipeline
 
-# Load model (automatically downloads from HuggingFace on first run)
-pipe = ov_genai.LLMPipeline("{full_id}", "CPU") # or "NPU"
+pipe = QwenPipeline("path/to/model/directory")
 print(pipe.generate("Hello, my name is", max_new_tokens=64))
 ```
 
@@ -103,9 +100,10 @@ print(pipe.generate("Hello, my name is", max_new_tokens=64))
 
 | File | Description |
 |------|-------------|
-| `openvino_model.xml` / `.bin` | OpenVINO IR (FP16 weights) |
-| `openvino_tokenizer.xml` / `.bin` | Tokenizer |
-| `openvino_detokenizer.xml` / `.bin` | Detokenizer |
+| `embed_tokens.xml` / `.bin` | Embedding layer (FP16) |
+| `layer_*.xml` / `.bin` | Stateful Transformer decoder layers (INT4) |
+| `lm_head.xml` / `.bin` | LM head & normalization layer (INT4) |
+| `tokenizer.json`, `tokenizer_config.json` | Tokeniser assets |
 | `config.json`, `generation_config.json` | Model config |
 """
     import tempfile
@@ -115,13 +113,13 @@ print(pipe.generate("Hello, my name is", max_new_tokens=64))
         upload_dir = Path(temp_dir)
         print(f"\n[1/2] Creating clean upload directory at {upload_dir} ...")
 
-        # Copy only required files (exclude split IR layers, embedding, lm_head, and safetensors metadata index)
-        exclude_prefixes = ("layer_", "embed_tokens", "lm_head")
+        # Copy split-IR files (exclude full model files and safetensors metadata index)
+        exclude_names = ("openvino_model.xml", "openvino_model.bin")
         
         copied_count = 0
         for item in ir_dir.iterdir():
             if item.is_file():
-                if item.name.startswith(exclude_prefixes) or "safetensors" in item.name:
+                if item.name in exclude_names or "safetensors" in item.name:
                     print(f"  Ignoring file: {item.name}")
                     continue
                 shutil.copy2(item, upload_dir / item.name)
@@ -141,7 +139,7 @@ print(pipe.generate("Hello, my name is", max_new_tokens=64))
             folder_path     = str(upload_dir),
             repo_id         = full_id,
             repo_type       = "model",
-            commit_message  = "Add Qwen3.5-4B OpenVINO FP16 IR (stateful single-model)",
+            commit_message  = "Add Qwen3.5-4B OpenVINO FP16 IR (split-IR layer-wise)",
             ignore_patterns = ["__pycache__", "*.pyc"],
             token           = token,
         )
